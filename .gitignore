@@ -7,3 +7,9 @@ node_modules
 /logs
 /sprites-export
 .env
+
+.DS_Store
+
+# Tauri
+tauri-app/src-tauri/target/
+tauri-app/dist/

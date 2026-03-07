@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { SettingsModal } from './SettingsModal.js'
 import type { WorkspaceFolder } from '../hooks/useExtensionMessages.js'
-import { vscode } from '../vscodeApi.js'
+import { getBackend } from '../ipc/backend.js'
 
 interface BottomToolbarProps {
   isEditMode: boolean
@@ -82,7 +82,7 @@ export function BottomToolbar({
 
   const handleFolderSelect = (folder: WorkspaceFolder) => {
     setIsFolderPickerOpen(false)
-    vscode.postMessage({ type: 'openClaude', folderPath: folder.path })
+    getBackend().postMessage({ type: 'openClaude', folderPath: folder.path })
   }
 
   return (

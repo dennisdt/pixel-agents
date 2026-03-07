@@ -183,10 +183,8 @@ for (const asset of assets) {
       isDesk: asset.isDesk,
     }
 
-    // Wall placement flag
-    if (asset.canPlaceOnWalls) {
-      entry.canPlaceOnWalls = true
-    }
+    // Wall placement flag (always include for Rust serde compatibility)
+    entry.canPlaceOnWalls = asset.canPlaceOnWalls || false
 
     // Surface placement flag
     if (asset.canPlaceOnSurfaces) {

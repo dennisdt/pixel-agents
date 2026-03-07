@@ -1,0 +1,27 @@
+[package]
+name = "pixel-agents"
+version = "1.0.0"
+description = "Pixel art office where AI agents come to life"
+authors = []
+edition = "2021"
+
+[lib]
+name = "pixel_agents_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4"] }
+portable-pty = "0.9"
+notify = "7"
+image = "0.25"
+dirs = "6"
+open = "5"

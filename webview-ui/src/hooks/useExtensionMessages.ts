@@ -7,7 +7,7 @@ import { buildDynamicCatalog } from '../office/layout/furnitureCatalog.js'
 import { setFloorSprites } from '../office/floorTiles.js'
 import { setWallSprites } from '../office/wallTiles.js'
 import { setCharacterTemplates } from '../office/sprites/spriteData.js'
-import { vscode } from '../vscodeApi.js'
+import { getBackend } from '../ipc/backend.js'
 import { playDoneSound, setSoundEnabled } from '../notificationSound.js'
 
 export interface SubagentCharacter {
@@ -50,6 +50,8 @@ export interface ExtensionMessageState {
   layoutReady: boolean
   loadedAssets?: { catalog: FurnitureAsset[]; sprites: Record<string, string[][]> }
   workspaceFolders: WorkspaceFolder[]
+  externalAgentIds: Set<number>
+  agentFolderNames: Record<number, string>
 }
 
 function saveAgentSeats(os: OfficeState): void {
@@ -58,7 +60,7 @@ function saveAgentSeats(os: OfficeState): void {
     if (ch.isSubagent) continue
     seats[ch.id] = { palette: ch.palette, hueShift: ch.hueShift, seatId: ch.seatId }
   }
-  vscode.postMessage({ type: 'saveAgentSeats', seats })
+  getBackend().postMessage({ type: 'saveAgentSeats', seats })
 }
 
 export function useExtensionMessages(
@@ -75,6 +77,8 @@ export function useExtensionMessages(
   const [layoutReady, setLayoutReady] = useState(false)
   const [loadedAssets, setLoadedAssets] = useState<{ catalog: FurnitureAsset[]; sprites: Record<string, string[][]> } | undefined>()
   const [workspaceFolders, setWorkspaceFolders] = useState<WorkspaceFolder[]>([])
+  const [externalAgentIds, setExternalAgentIds] = useState<Set<number>>(new Set())
+  const [agentFolderNames, setAgentFolderNames] = useState<Record<number, string>>({})
 
   // Track whether initial layout has been loaded (ref to avoid re-render)
   const layoutReadyRef = useRef(false)
@@ -83,8 +87,7 @@ export function useExtensionMessages(
     // Buffer agents from existingAgents until layout is loaded
     let pendingAgents: Array<{ id: number; palette?: number; hueShift?: number; seatId?: string; folderName?: string }> = []
 
-    const handler = (e: MessageEvent) => {
-      const msg = e.data
+    const handler = (msg: { type: string; [key: string]: unknown }) => {
       const os = getOfficeState()
 
       if (msg.type === 'layoutLoaded') {
@@ -115,14 +118,29 @@ export function useExtensionMessages(
       } else if (msg.type === 'agentCreated') {
         const id = msg.id as number
         const folderName = msg.folderName as string | undefined
+        const isExternal = msg.isExternal as boolean | undefined
         setAgents((prev) => (prev.includes(id) ? prev : [...prev, id]))
-        setSelectedAgent(id)
+        if (folderName) {
+          setAgentFolderNames((prev) => ({ ...prev, [id]: folderName }))
+        }
+        if (isExternal) {
+          setExternalAgentIds((prev) => { const next = new Set(prev); next.add(id); return next })
+        } else {
+          setSelectedAgent(id)
+        }
         os.addAgent(id, undefined, undefined, undefined, undefined, folderName)
         saveAgentSeats(os)
       } else if (msg.type === 'agentClosed') {
         const id = msg.id as number
         setAgents((prev) => prev.filter((a) => a !== id))
         setSelectedAgent((prev) => (prev === id ? null : prev))
+        setExternalAgentIds((prev) => { if (!prev.has(id)) return prev; const next = new Set(prev); next.delete(id); return next })
+        setAgentFolderNames((prev) => {
+          if (!(id in prev)) return prev
+          const next = { ...prev }
+          delete next[id]
+          return next
+        })
         setAgentTools((prev) => {
           if (!(id in prev)) return prev
           const next = { ...prev }
@@ -164,6 +182,9 @@ export function useExtensionMessages(
           }
           return merged.sort((a, b) => a - b)
         })
+        if (Object.keys(folderNames).length > 0) {
+          setAgentFolderNames((prev) => ({ ...prev, ...folderNames }))
+        }
       } else if (msg.type === 'agentToolStart') {
         const id = msg.id as number
         const toolId = msg.toolId as string
@@ -355,10 +376,10 @@ export function useExtensionMessages(
         }
       }
     }
-    window.addEventListener('message', handler)
-    vscode.postMessage({ type: 'webviewReady' })
-    return () => window.removeEventListener('message', handler)
+    const unsubscribe = getBackend().onMessage(handler)
+    getBackend().postMessage({ type: 'webviewReady' })
+    return unsubscribe
   }, [getOfficeState])
 
-  return { agents, selectedAgent, agentTools, agentStatuses, subagentTools, subagentCharacters, layoutReady, loadedAssets, workspaceFolders }
+  return { agents, selectedAgent, agentTools, agentStatuses, subagentTools, subagentCharacters, layoutReady, loadedAssets, workspaceFolders, externalAgentIds, agentFolderNames }
 }

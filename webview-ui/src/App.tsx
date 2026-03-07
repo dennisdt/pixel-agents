@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import { OfficeState } from './office/engine/officeState.js'
 import { OfficeCanvas } from './office/components/OfficeCanvas.js'
 import { ToolOverlay } from './office/components/ToolOverlay.js'
@@ -6,7 +6,7 @@ import { EditorToolbar } from './office/editor/EditorToolbar.js'
 import { EditorState } from './office/editor/editorState.js'
 import { EditTool } from './office/types.js'
 import { isRotatable } from './office/layout/furnitureCatalog.js'
-import { vscode } from './vscodeApi.js'
+import { getBackend } from './ipc/backend.js'
 import { useExtensionMessages } from './hooks/useExtensionMessages.js'
 import { PULSE_ANIMATION_DURATION_SEC } from './constants.js'
 import { useEditorActions } from './hooks/useEditorActions.js'
@@ -14,6 +14,12 @@ import { useEditorKeyboard } from './hooks/useEditorKeyboard.js'
 import { ZoomControls } from './components/ZoomControls.js'
 import { BottomToolbar } from './components/BottomToolbar.js'
 import { DebugView } from './components/DebugView.js'
+import { TerminalPanel } from './terminal/TerminalPanel.js'
+
+const isTauri = !!(window.__TAURI__ ?? window.__TAURI_INTERNALS__)
+const DEFAULT_TERMINAL_HEIGHT = 300
+const MIN_TERMINAL_HEIGHT = 100
+const DIVIDER_HEIGHT = 6
 
 // Game state lives outside React — updated imperatively by message handlers
 const officeStateRef = { current: null as OfficeState | null }
@@ -121,14 +127,17 @@ function App() {
 
   const isEditDirty = useCallback(() => editor.isEditMode && editor.isDirty, [editor.isEditMode, editor.isDirty])
 
-  const { agents, selectedAgent, agentTools, agentStatuses, subagentTools, subagentCharacters, layoutReady, loadedAssets, workspaceFolders } = useExtensionMessages(getOfficeState, editor.setLastSavedLayout, isEditDirty)
+  const { agents, selectedAgent, agentTools, agentStatuses, subagentTools, subagentCharacters, layoutReady, loadedAssets, workspaceFolders, externalAgentIds, agentFolderNames } = useExtensionMessages(getOfficeState, editor.setLastSavedLayout, isEditDirty)
 
   const [isDebugMode, setIsDebugMode] = useState(false)
+  const [terminalHeight, setTerminalHeight] = useState(DEFAULT_TERMINAL_HEIGHT)
+  const [showTerminal, setShowTerminal] = useState(isTauri)
+  const isDraggingRef = useRef(false)
 
   const handleToggleDebugMode = useCallback(() => setIsDebugMode((prev) => !prev), [])
 
   const handleSelectAgent = useCallback((id: number) => {
-    vscode.postMessage({ type: 'focusAgent', id })
+    getBackend().postMessage({ type: 'focusAgent', id })
   }, [])
 
   const containerRef = useRef<HTMLDivElement>(null)
@@ -147,7 +156,7 @@ function App() {
   )
 
   const handleCloseAgent = useCallback((id: number) => {
-    vscode.postMessage({ type: 'closeAgent', id })
+    getBackend().postMessage({ type: 'closeAgent', id })
   }, [])
 
   const handleClick = useCallback((agentId: number) => {
@@ -155,7 +164,49 @@ function App() {
     const os = getOfficeState()
     const meta = os.subagentMeta.get(agentId)
     const focusId = meta ? meta.parentAgentId : agentId
-    vscode.postMessage({ type: 'focusAgent', id: focusId })
+    getBackend().postMessage({ type: 'focusAgent', id: focusId })
+  }, [])
+
+  // Divider drag-to-resize
+  const handleDividerMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    isDraggingRef.current = true
+    const startY = e.clientY
+    const startHeight = terminalHeight
+
+    const onMove = (ev: MouseEvent) => {
+      if (!isDraggingRef.current) return
+      const delta = startY - ev.clientY
+      const newHeight = Math.max(MIN_TERMINAL_HEIGHT, startHeight + delta)
+      const maxHeight = window.innerHeight - 150
+      setTerminalHeight(Math.min(newHeight, maxHeight))
+    }
+
+    const onUp = () => {
+      isDraggingRef.current = false
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+
+    document.body.style.cursor = 'row-resize'
+    document.body.style.userSelect = 'none'
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+  }, [terminalHeight])
+
+  // Toggle terminal with Ctrl+`
+  useEffect(() => {
+    if (!isTauri) return
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === '`') {
+        e.preventDefault()
+        setShowTerminal((prev) => !prev)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
   }, [])
 
   const officeState = getOfficeState()
@@ -183,7 +234,7 @@ function App() {
     )
   }
 
-  return (
+  const officeContent = (
     <div ref={containerRef} style={{ width: '100%', height: '100%', position: 'relative', overflow: 'hidden' }}>
       <style>{`
         @keyframes pixel-agents-pulse {
@@ -306,6 +357,44 @@ function App() {
           onSelectAgent={handleSelectAgent}
         />
       )}
+    </div>
+  )
+
+  // In VS Code mode, render office only (terminal is in VS Code's own panel)
+  if (!isTauri || !showTerminal) {
+    return officeContent
+  }
+
+  // In Tauri mode, render split layout with terminal panel
+  return (
+    <div style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      <div style={{ flex: 1, minHeight: 100, overflow: 'hidden' }}>
+        {officeContent}
+      </div>
+      <div
+        style={{
+          height: DIVIDER_HEIGHT,
+          background: '#181825',
+          cursor: 'row-resize',
+          flexShrink: 0,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+        onMouseDown={handleDividerMouseDown}
+      >
+        <div style={{ width: 40, height: 2, background: '#4a4a6a', borderRadius: 1 }} />
+      </div>
+      <TerminalPanel
+        agents={agents.filter(id => !externalAgentIds.has(id))}
+        selectedAgent={selectedAgent}
+        onSelectAgent={handleSelectAgent}
+        onCloseAgent={handleCloseAgent}
+        height={terminalHeight}
+        externalAgents={agents.filter(id => externalAgentIds.has(id))}
+        agentStatuses={agentStatuses}
+        agentFolderNames={agentFolderNames}
+      />
     </div>
   )
 }

@@ -2428,33 +2428,21 @@
     },
     {
       "uid": "f-1770831748000-ksmj",
-      "type": "ASSET_18",
+      "type": "ASSET_29",
       "col": 1,
       "row": 10
     },
     {
       "uid": "f-1770831767041-zaxr",
-      "type": "ASSET_18",
+      "type": "ASSET_29",
       "col": 7,
       "row": 10
     },
     {
       "uid": "f-1770831768596-kx8j",
-      "type": "ASSET_17",
+      "type": "ASSET_28",
       "col": 3,
       "row": 10
-    },
-    {
-      "uid": "f-1770831788343-fbxl",
-      "type": "ASSET_143",
-      "col": 1,
-      "row": 11
-    },
-    {
-      "uid": "f-1770831791526-md8k",
-      "type": "ASSET_142",
-      "col": 1,
-      "row": 19
     },
     {
       "uid": "f-1770831898859-bfdn",
@@ -2488,13 +2476,13 @@
     },
     {
       "uid": "f-1771119388928-dbrf",
-      "type": "ASSET_NEW_110",
+      "type": "ASSET_33",
       "col": 14,
       "row": 17
     },
     {
       "uid": "f-1771119393112-vl9b",
-      "type": "ASSET_NEW_111",
+      "type": "ASSET_34",
       "col": 17,
       "row": 17
     },
@@ -2565,38 +2553,20 @@
       }
     },
     {
-      "uid": "f-1771254122890-desz",
-      "type": "ASSET_142",
-      "col": 10,
-      "row": 19
-    },
-    {
-      "uid": "f-1771254147816-bpkr",
-      "type": "ASSET_140",
-      "col": 14,
-      "row": 15
-    },
-    {
-      "uid": "f-1771254151704-exrz",
-      "type": "ASSET_141",
-      "col": 17,
-      "row": 15
-    },
-    {
       "uid": "f-1771273583560-z9r1",
-      "type": "ASSET_NEW_112",
+      "type": "ASSET_50_0_0",
       "col": 15,
       "row": 17
     },
     {
       "uid": "f-1771273618430-t3u3",
-      "type": "ASSET_18",
+      "type": "ASSET_29",
       "col": 18,
       "row": 15
     },
     {
       "uid": "f-1771273619213-ylzf",
-      "type": "ASSET_18",
+      "type": "ASSET_29",
       "col": 12,
       "row": 15
     },
@@ -2632,13 +2602,13 @@
     },
     {
       "uid": "f-1771277148633-u8j9",
-      "type": "ASSET_18",
+      "type": "ASSET_29",
       "col": 9,
       "row": 10
     },
     {
       "uid": "f-1771277212373-enh1",
-      "type": "ASSET_27_A",
+      "type": "ASSET_NEW_106",
       "col": 5,
       "row": 2,
       "color": {
@@ -2727,30 +2697,6 @@
       "row": 0
     },
     {
-      "uid": "f-1771277574471-hcv0",
-      "type": "ASSET_142",
-      "col": 3,
-      "row": 1
-    },
-    {
-      "uid": "f-1771277575299-mfxh",
-      "type": "ASSET_142",
-      "col": 8,
-      "row": 1
-    },
-    {
-      "uid": "f-1771277802319-1joi",
-      "type": "ASSET_140",
-      "col": 19,
-      "row": 19
-    },
-    {
-      "uid": "f-1771277804247-jvcl",
-      "type": "ASSET_141",
-      "col": 12,
-      "row": 19
-    },
-    {
       "uid": "f-1771279067027-ia1a",
       "type": "ASSET_99",
       "col": 15,
@@ -2797,6 +2743,51 @@
       "type": "ASSET_123",
       "col": 2,
       "row": 19
+    },
+    {
+      "type": "ASSET_132",
+      "row": 11,
+      "col": 1
+    },
+    {
+      "type": "ASSET_132",
+      "row": 19,
+      "col": 1
+    },
+    {
+      "type": "ASSET_132",
+      "row": 19,
+      "col": 10
+    },
+    {
+      "type": "ASSET_133_0_0",
+      "row": 15,
+      "col": 14
+    },
+    {
+      "type": "ASSET_133_0_0",
+      "row": 15,
+      "col": 17
+    },
+    {
+      "type": "ASSET_132",
+      "row": 1,
+      "col": 3
+    },
+    {
+      "type": "ASSET_132",
+      "row": 1,
+      "col": 8
+    },
+    {
+      "type": "ASSET_133_0_0",
+      "row": 19,
+      "col": 19
+    },
+    {
+      "type": "ASSET_133_0_0",
+      "row": 19,
+      "col": 12
     }
   ]
 }

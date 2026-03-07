@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { vscode } from '../vscodeApi.js'
+import { getBackend } from '../ipc/backend.js'
 import { isSoundEnabled, setSoundEnabled } from '../notificationSound.js'
 
 interface SettingsModalProps {
@@ -94,7 +94,7 @@ export function SettingsModal({ isOpen, onClose, isDebugMode, onToggleDebugMode 
         {/* Menu items */}
         <button
           onClick={() => {
-            vscode.postMessage({ type: 'openSessionsFolder' })
+            getBackend().postMessage({ type: 'openSessionsFolder' })
             onClose()
           }}
           onMouseEnter={() => setHovered('sessions')}
@@ -108,7 +108,7 @@ export function SettingsModal({ isOpen, onClose, isDebugMode, onToggleDebugMode 
         </button>
         <button
           onClick={() => {
-            vscode.postMessage({ type: 'exportLayout' })
+            getBackend().postMessage({ type: 'exportLayout' })
             onClose()
           }}
           onMouseEnter={() => setHovered('export')}
@@ -122,7 +122,7 @@ export function SettingsModal({ isOpen, onClose, isDebugMode, onToggleDebugMode 
         </button>
         <button
           onClick={() => {
-            vscode.postMessage({ type: 'importLayout' })
+            getBackend().postMessage({ type: 'importLayout' })
             onClose()
           }}
           onMouseEnter={() => setHovered('import')}
@@ -139,7 +139,7 @@ export function SettingsModal({ isOpen, onClose, isDebugMode, onToggleDebugMode 
             const newVal = !isSoundEnabled()
             setSoundEnabled(newVal)
             setSoundLocal(newVal)
-            vscode.postMessage({ type: 'setSoundEnabled', enabled: newVal })
+            getBackend().postMessage({ type: 'setSoundEnabled', enabled: newVal })
           }}
           onMouseEnter={() => setHovered('sound')}
           onMouseLeave={() => setHovered(null)}

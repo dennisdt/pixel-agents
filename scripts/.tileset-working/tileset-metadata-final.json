@@ -141,7 +141,7 @@
       "footprintH": 2,
       "isDesk": false,
       "colorEditable": false,
-      "discard": false,
+      "discard": true,
       "backgroundTiles": 1,
       "canPlaceOnSurfaces": false,
       "partOfGroup": false,
@@ -160,7 +160,7 @@
       "footprintH": 2,
       "isDesk": false,
       "colorEditable": false,
-      "discard": false,
+      "discard": true,
       "backgroundTiles": 1,
       "canPlaceOnSurfaces": false,
       "partOfGroup": false,
@@ -198,7 +198,7 @@
       "footprintH": 2,
       "isDesk": false,
       "colorEditable": false,
-      "discard": false,
+      "discard": true,
       "backgroundTiles": 1,
       "canPlaceOnSurfaces": false,
       "partOfGroup": false,
@@ -217,7 +217,7 @@
       "footprintH": 2,
       "isDesk": false,
       "colorEditable": false,
-      "discard": false,
+      "discard": true,
       "backgroundTiles": 1,
       "canPlaceOnSurfaces": false,
       "partOfGroup": false,
@@ -257,7 +257,7 @@
       "footprintH": 4,
       "isDesk": true,
       "colorEditable": true,
-      "discard": false,
+      "discard": true,
       "partOfGroup": true,
       "groupId": "TABLE_LG",
       "canPlaceOnSurfaces": false,
@@ -1331,7 +1331,7 @@
       "footprintH": 1,
       "isDesk": false,
       "colorEditable": false,
-      "discard": true,
+      "discard": false,
       "partOfGroup": false,
       "groupId": null,
       "canPlaceOnSurfaces": false,
@@ -1687,20 +1687,19 @@
       "paddedX": 159,
       "paddedY": 386,
       "paddedWidth": 16,
-      "paddedHeight": 32,
+      "paddedHeight": 16,
       "erasedPixels": [],
       "name": "LAPTOP_RIGHT",
       "label": "Laptop - Right",
       "category": "electronics",
       "footprintW": 1,
-      "footprintH": 2,
+      "footprintH": 1,
       "isDesk": false,
       "colorEditable": false,
       "discard": false,
       "partOfGroup": true,
       "groupId": "LAPTOP",
       "canPlaceOnSurfaces": true,
-      "backgroundTiles": 1,
       "orientation": "right",
       "canPlaceOnWalls": false
     },
@@ -1709,29 +1708,19 @@
       "paddedX": 177,
       "paddedY": 386,
       "paddedWidth": 16,
-      "paddedHeight": 32,
-      "erasedPixels": [
-        {
-          "x": 13,
-          "y": 31
-        },
-        {
-          "x": 12,
-          "y": 31
-        }
-      ],
+      "paddedHeight": 16,
+      "erasedPixels": [],
       "name": "LAPTOP_LEFT",
       "label": "Laptop - Left",
       "category": "electronics",
       "footprintW": 1,
-      "footprintH": 2,
+      "footprintH": 1,
       "isDesk": false,
       "colorEditable": true,
       "discard": false,
       "partOfGroup": true,
       "groupId": "LAPTOP",
       "canPlaceOnSurfaces": true,
-      "backgroundTiles": 1,
       "orientation": "left",
       "canPlaceOnWalls": false
     },
@@ -2354,7 +2343,8 @@
       "groupId": "LAPTOP",
       "canPlaceOnSurfaces": true,
       "backgroundTiles": 1,
-      "orientation": "front"
+      "orientation": "front",
+      "state": "off"
     },
     {
       "id": "ASSET_108",
@@ -2400,7 +2390,8 @@
       "groupId": "LAPTOP",
       "canPlaceOnSurfaces": true,
       "backgroundTiles": 1,
-      "orientation": "front"
+      "orientation": "front",
+      "state": "on"
     },
     {
       "id": "ASSET_110",
@@ -3222,104 +3213,22 @@
     },
     {
       "id": "ASSET_133_0_0",
-      "paddedX": 240,
-      "paddedY": 528,
+      "paddedX": 48,
+      "paddedY": 448,
       "paddedWidth": 16,
-      "paddedHeight": 32,
-      "erasedPixels": [
-        {
-          "x": 12,
-          "y": 0
-        },
-        {
-          "x": 11,
-          "y": 0
-        },
-        {
-          "x": 10,
-          "y": 0
-        },
-        {
-          "x": 9,
-          "y": 0
-        },
-        {
-          "x": 8,
-          "y": 0
-        },
-        {
-          "x": 7,
-          "y": 0
-        },
-        {
-          "x": 6,
-          "y": 1
-        },
-        {
-          "x": 5,
-          "y": 1
-        },
-        {
-          "x": 4,
-          "y": 1
-        },
-        {
-          "x": 3,
-          "y": 1
-        },
-        {
-          "x": 2,
-          "y": 1
-        },
-        {
-          "x": 1,
-          "y": 1
-        },
-        {
-          "x": 0,
-          "y": 1
-        },
-        {
-          "x": 3,
-          "y": 0
-        },
-        {
-          "x": 4,
-          "y": 0
-        },
-        {
-          "x": 5,
-          "y": 0
-        },
-        {
-          "x": 2,
-          "y": 0
-        },
-        {
-          "x": 1,
-          "y": 0
-        },
-        {
-          "x": 0,
-          "y": 0
-        },
-        {
-          "x": 6,
-          "y": 0
-        }
-      ],
+      "paddedHeight": 24,
+      "erasedPixels": [],
       "name": "WHITE_PLANT_1",
       "label": "Small Plant",
       "category": "decor",
       "footprintW": 1,
-      "footprintH": 2,
+      "footprintH": 1,
       "isDesk": false,
       "colorEditable": true,
       "discard": false,
       "partOfGroup": false,
       "groupId": null,
-      "canPlaceOnSurfaces": true,
-      "backgroundTiles": 1
+      "canPlaceOnSurfaces": true
     },
     {
       "id": "ASSET_133_1_0",
@@ -3780,27 +3689,26 @@
     },
     {
       "id": "ASSET_132",
-      "paddedX": 176,
-      "paddedY": 560,
+      "paddedX": 32,
+      "paddedY": 446,
       "paddedWidth": 16,
-      "paddedHeight": 32,
+      "paddedHeight": 24,
       "name": "PLANT_1",
       "label": "Small Plant",
       "category": "decor",
       "footprintW": 1,
-      "footprintH": 2,
+      "footprintH": 1,
       "isDesk": false,
       "colorEditable": false,
       "discard": false,
       "partOfGroup": false,
       "groupId": "PLANT",
-      "canPlaceOnSurfaces": true,
-      "backgroundTiles": 1
+      "canPlaceOnSurfaces": true
     },
     {
       "id": "ASSET_140",
-      "paddedX": 224,
-      "paddedY": 560,
+      "paddedX": 96,
+      "paddedY": 440,
       "paddedWidth": 16,
       "paddedHeight": 32,
       "name": "WHITE_PLANT_2",
@@ -3818,8 +3726,8 @@
     },
     {
       "id": "ASSET_141",
-      "paddedX": 240,
-      "paddedY": 560,
+      "paddedX": 112,
+      "paddedY": 440,
       "paddedWidth": 16,
       "paddedHeight": 32,
       "name": "WHITE_PLANT_3",
@@ -3837,8 +3745,8 @@
     },
     {
       "id": "ASSET_142",
-      "paddedX": 192,
-      "paddedY": 560,
+      "paddedX": 96,
+      "paddedY": 440,
       "paddedWidth": 16,
       "paddedHeight": 32,
       "name": "PLANT_2",
@@ -3856,8 +3764,8 @@
     },
     {
       "id": "ASSET_143",
-      "paddedX": 208,
-      "paddedY": 560,
+      "paddedX": 112,
+      "paddedY": 440,
       "paddedWidth": 16,
       "paddedHeight": 32,
       "name": "PLANT_3",
@@ -4532,7 +4440,7 @@
       "footprintH": 1,
       "isDesk": false,
       "canPlaceOnWalls": false,
-      "discard": false,
+      "discard": true,
       "backgroundTiles": 0,
       "canPlaceOnSurfaces": false,
       "partOfGroup": true,
@@ -4552,7 +4460,7 @@
       "footprintH": 1,
       "isDesk": false,
       "canPlaceOnWalls": false,
-      "discard": false,
+      "discard": true,
       "backgroundTiles": 0,
       "canPlaceOnSurfaces": false,
       "partOfGroup": true,
@@ -4572,7 +4480,7 @@
       "footprintH": 2,
       "isDesk": false,
       "canPlaceOnWalls": false,
-      "discard": false,
+      "discard": true,
       "backgroundTiles": 0,
       "canPlaceOnSurfaces": false,
       "partOfGroup": true,
@@ -4592,7 +4500,7 @@
       "footprintH": 2,
       "isDesk": false,
       "canPlaceOnWalls": false,
-      "discard": false,
+      "discard": true,
       "backgroundTiles": 0,
       "canPlaceOnSurfaces": false,
       "partOfGroup": true,
@@ -4612,7 +4520,7 @@
       "footprintH": 2,
       "isDesk": true,
       "canPlaceOnWalls": false,
-      "discard": false,
+      "discard": true,
       "backgroundTiles": 1,
       "canPlaceOnSurfaces": false,
       "partOfGroup": false,
