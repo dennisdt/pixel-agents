@@ -14,6 +14,8 @@ import { useEditorKeyboard } from './hooks/useEditorKeyboard.js'
 import { ZoomControls } from './components/ZoomControls.js'
 import { BottomToolbar } from './components/BottomToolbar.js'
 import { DebugView } from './components/DebugView.js'
+import { TitleBar } from './components/TitleBar.js'
+import { isElectron } from './vscodeApi.js'
 
 // Game state lives outside React — updated imperatively by message handlers
 const officeStateRef = { current: null as OfficeState | null }
@@ -177,14 +179,19 @@ function App() {
 
   if (!layoutReady) {
     return (
-      <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--vscode-foreground)' }}>
-        Loading...
+      <div style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column' }}>
+        {isElectron && <TitleBar />}
+        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--pixel-text)' }}>
+          Loading...
+        </div>
       </div>
     )
   }
 
   return (
-    <div ref={containerRef} style={{ width: '100%', height: '100%', position: 'relative', overflow: 'hidden' }}>
+    <div style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column' }}>
+      {isElectron && <TitleBar />}
+      <div ref={containerRef} style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
       <style>{`
         @keyframes pixel-agents-pulse {
           0%, 100% { opacity: 1; }
@@ -306,6 +313,7 @@ function App() {
           onSelectAgent={handleSelectAgent}
         />
       )}
+      </div>
     </div>
   )
 }

@@ -7,7 +7,7 @@ import { buildDynamicCatalog } from '../office/layout/furnitureCatalog.js'
 import { setFloorSprites } from '../office/floorTiles.js'
 import { setWallSprites } from '../office/wallTiles.js'
 import { setCharacterTemplates } from '../office/sprites/spriteData.js'
-import { vscode } from '../vscodeApi.js'
+import { vscode, electronControls } from '../vscodeApi.js'
 import { playDoneSound, setSoundEnabled } from '../notificationSound.js'
 
 export interface SubagentCharacter {
@@ -83,8 +83,8 @@ export function useExtensionMessages(
     // Buffer agents from existingAgents until layout is loaded
     let pendingAgents: Array<{ id: number; palette?: number; hueShift?: number; seatId?: string; folderName?: string }> = []
 
-    const handler = (e: MessageEvent) => {
-      const msg = e.data
+    const handler = (rawMsg: unknown) => {
+      const msg = rawMsg as Record<string, unknown>
       const os = getOfficeState()
 
       if (msg.type === 'layoutLoaded') {
@@ -355,9 +355,16 @@ export function useExtensionMessages(
         }
       }
     }
-    window.addEventListener('message', handler)
+    let cleanup: () => void
+    if (electronControls) {
+      cleanup = electronControls.onMessage(handler)
+    } else {
+      const wrappedHandler = (e: MessageEvent) => handler(e.data)
+      window.addEventListener('message', wrappedHandler)
+      cleanup = () => window.removeEventListener('message', wrappedHandler)
+    }
     vscode.postMessage({ type: 'webviewReady' })
-    return () => window.removeEventListener('message', handler)
+    return cleanup
   }, [getOfficeState])
 
   return { agents, selectedAgent, agentTools, agentStatuses, subagentTools, subagentCharacters, layoutReady, loadedAssets, workspaceFolders }

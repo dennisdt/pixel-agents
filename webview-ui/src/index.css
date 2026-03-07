@@ -50,6 +50,10 @@
   --pixel-overlay-z: 100;
   --pixel-overlay-selected-z: 110;
   --pixel-controls-z: 50;
+
+  /* VS Code variable fallbacks for Electron mode */
+  --vscode-foreground: rgba(255, 255, 255, 0.8);
+  --vscode-editor-background: #1e1e2e;
 }
 
 html, body, #root {

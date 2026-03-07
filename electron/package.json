@@ -1,0 +1,32 @@
+{
+  "name": "pixel-agents-desktop",
+  "version": "1.0.0",
+  "description": "Pixel Agents — Desktop companion app",
+  "main": "dist/main.js",
+  "private": true,
+  "config": {
+    "forge": "./forge.config.js"
+  },
+  "scripts": {
+    "build:main": "node esbuild.electron.js",
+    "build:webview": "cd ../webview-ui && npm run build",
+    "build": "npm run build:webview && npm run build:main",
+    "dev:main": "node esbuild.electron.js --watch",
+    "dev:vite": "cd ../webview-ui && npx vite --port 5173",
+    "dev": "npm run build:main && npx electron .",
+    "start": "npx electron .",
+    "package": "npm run build && npx electron-forge package",
+    "make": "npm run build && npx electron-forge make"
+  },
+  "devDependencies": {
+    "electron": "^35.1.5",
+    "@electron-forge/cli": "^7.8.0",
+    "@electron-forge/maker-dmg": "^7.8.0",
+    "@electron-forge/maker-zip": "^7.8.0",
+    "@types/node": "22.x",
+    "esbuild": "^0.27.2",
+    "pngjs": "^7.0.0",
+    "@types/pngjs": "^6.0.5",
+    "typescript": "^5.9.3"
+  }
+}

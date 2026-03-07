@@ -7,3 +7,11 @@ node_modules
 /logs
 /sprites-export
 .env
+.DS_Store
+
+# Electron build artifacts
+electron/out
+electron/dist
+
+# Tauri build artifacts
+tauri-app/src-tauri/target

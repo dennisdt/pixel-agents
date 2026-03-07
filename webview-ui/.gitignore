@@ -28,3 +28,7 @@ dist-ssr
 !*/assets/characters/
 !*/assets/default-layout.json
 !*/assets/walls.png
+!*/assets/floors.png
+!*/assets/office_tileset_16x16.png
+!*/assets/furniture/
+!*/assets/furniture/**
