@@ -12,30 +12,116 @@ use crate::watcher::file_watcher;
 const GLOBAL_SCAN_INTERVAL_MS: u64 = 3000;
 const MAX_MTIME_AGE_SECS: u64 = 120;
 
-/// Derive a human-readable folder name from a Claude project directory name.
-/// Project dir names look like: `Users-dennistran-projects-personal-pixel-agents`
-/// Strategy: scan backwards from the end, stop at common path segments.
-fn derive_folder_name(project_dir_name: &str) -> String {
-    let segments: Vec<&str> = project_dir_name.split('-').collect();
+/// Hash a filesystem path the same way Claude does: replace non-alphanumeric/hyphen chars with `-`.
+fn hash_path(p: &std::path::Path) -> String {
+    p.to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .collect()
+}
 
-    let stop_words: &[&str] = &[
-        "Users", "home", "root", "Volumes", "projects", "personal", "work", "dev", "src",
-        "code", "repos", "Documents", "Desktop", "workspace", "workspaces", "github", "gitlab",
-        "mnt", "opt", "var", "tmp", "Home",
+/// Search `root` up to `max_depth` levels deep for a directory whose hashed path == `target_hash`.
+/// Returns the last 1-2 path components as a display name (e.g. "org/repo-name").
+fn search_for_matching_path(
+    root: &std::path::Path,
+    target_hash: &str,
+    max_depth: u32,
+    depth: u32,
+) -> Option<String> {
+    if depth > max_depth {
+        return None;
+    }
+    let entries = std::fs::read_dir(root).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if hash_path(&path) == target_hash {
+            // Found! Return last 2 path components for context (e.g. "org/repo")
+            let name = path.file_name()?.to_string_lossy().to_string();
+            // If parent is the search root, just return the name
+            if path.parent().map(|p| p == root).unwrap_or(true) {
+                return Some(name);
+            }
+            // Otherwise include parent dir for context: "parent/name"
+            if let Some(parent_name) = path.parent().and_then(|p| p.file_name()) {
+                return Some(format!("{}/{}", parent_name.to_string_lossy(), name));
+            }
+            return Some(name);
+        }
+        // Recurse deeper
+        if let Some(result) = search_for_matching_path(&path, target_hash, max_depth, depth + 1) {
+            return Some(result);
+        }
+    }
+    None
+}
+
+/// Derive a human-readable folder name from a Claude project directory name.
+/// Project dir names are hashed paths like: `-Volumes-SSD-Home-projects-org-my-app`
+/// Strategy: search common directories on disk to find the real path that matches,
+/// then return the actual directory name (preserving slashes and original casing).
+fn derive_folder_name(project_dir_name: &str) -> String {
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return fallback_folder_name(project_dir_name),
+    };
+
+    let mut roots: Vec<PathBuf> = vec![
+        home.clone(),
+        home.join("projects"),
+        home.join("Projects"),
+        home.join("Developer"),
+        home.join("dev"),
+        home.join("code"),
+        home.join("src"),
+        home.join("work"),
+        home.join("Documents"),
     ];
 
-    // Scan from end backwards, find the last stop word
-    let mut cut = 0;
-    for (i, seg) in segments.iter().enumerate().rev() {
-        if stop_words.contains(seg) {
-            cut = i + 1;
-            break;
+    // Check /Volumes/*/ and common subdirectories
+    if let Ok(entries) = std::fs::read_dir("/Volumes") {
+        for entry in entries.flatten() {
+            let vol_path = entry.path();
+            if vol_path.is_dir() {
+                roots.push(vol_path.clone());
+                for sub in &["Home/projects", "projects", "Users"] {
+                    let vol_sub = vol_path.join(sub);
+                    if vol_sub.exists() {
+                        roots.push(vol_sub);
+                    }
+                }
+            }
         }
     }
 
-    if cut < segments.len() {
-        segments[cut..].join("-")
-    } else if segments.len() >= 2 {
+    // Search up to 4 levels deep from each root
+    for root in &roots {
+        if !root.exists() {
+            continue;
+        }
+        if let Some(name) = search_for_matching_path(root, project_dir_name, 4, 0) {
+            return name;
+        }
+    }
+
+    fallback_folder_name(project_dir_name)
+}
+
+/// Fallback: use stop-word heuristic when filesystem search fails.
+fn fallback_folder_name(project_dir_name: &str) -> String {
+    // Try regex-style match: everything after "projects-"
+    if let Some(idx) = project_dir_name.rfind("projects-") {
+        let after = &project_dir_name[idx + "projects-".len()..];
+        if !after.is_empty() {
+            return after.to_string();
+        }
+    }
+
+    // Last resort: last 2 segments
+    let segments: Vec<&str> = project_dir_name.split('-').filter(|s| !s.is_empty()).collect();
+    if segments.len() >= 2 {
         segments[segments.len() - 2..].join("-")
     } else {
         project_dir_name.to_string()
@@ -199,22 +285,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_derive_folder_name() {
+    fn test_fallback_folder_name() {
+        // When filesystem search fails, fallback heuristic kicks in
         assert_eq!(
-            derive_folder_name("Users-dennistran-projects-personal-pixel-agents"),
-            "pixel-agents"
-        );
-        assert_eq!(
-            derive_folder_name("Users-john-code-my-app"),
+            fallback_folder_name("Users-john-projects-my-app"),
             "my-app"
         );
         assert_eq!(
-            derive_folder_name("home-user-dev-project"),
+            fallback_folder_name("home-user-projects-project"),
             "project"
         );
+        // Last resort: last 2 segments
         assert_eq!(
-            derive_folder_name("Volumes-SSD-Users-dennis-projects-foo"),
-            "foo"
+            fallback_folder_name("some-unknown-path"),
+            "unknown-path"
         );
+    }
+
+    #[test]
+    fn test_hash_path() {
+        let p = std::path::Path::new("/Volumes/SSD/Home/projects/my-app");
+        assert_eq!(hash_path(p), "-Volumes-SSD-Home-projects-my-app");
     }
 }

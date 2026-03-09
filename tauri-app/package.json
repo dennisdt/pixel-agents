@@ -4,8 +4,9 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --config vite.config.ts",
-    "build": "vite build --config vite.config.ts",
+    "copy-assets": "node scripts/copy-assets.mjs",
+    "dev": "node scripts/copy-assets.mjs && vite --config vite.config.ts",
+    "build": "node scripts/copy-assets.mjs && vite build --config vite.config.ts",
     "tauri": "cargo tauri"
   },
   "dependencies": {
