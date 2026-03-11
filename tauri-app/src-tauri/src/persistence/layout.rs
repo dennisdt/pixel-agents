@@ -154,13 +154,9 @@ pub fn mark_own_write(skip_flag: &Arc<AtomicBool>) {
     skip_flag.store(true, Ordering::SeqCst);
 }
 
-/// Get project hash dir path (same algorithm as VS Code extension)
+/// Get project hash dir path (same algorithm as VS Code extension and global scanner)
 pub fn get_project_dir_path(workspace_path: &str) -> PathBuf {
-    let dir_name: String = workspace_path
-        .chars()
-        .map(|c| if c == ':' || c == '\\' || c == '/' { '-' } else { c })
-        .filter(|c| c.is_alphanumeric() || *c == '-')
-        .collect();
+    let dir_name = crate::tty::hash_path(std::path::Path::new(workspace_path));
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     home.join(".claude").join("projects").join(dir_name)
 }

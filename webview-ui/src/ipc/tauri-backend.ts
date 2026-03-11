@@ -16,8 +16,12 @@ declare global {
   }
 }
 
-function getTauri(): TauriGlobal | undefined {
+export function getTauri(): TauriGlobal | undefined {
   return window.__TAURI__ ?? window.__TAURI_INTERNALS__
+}
+
+export function isTauri(): boolean {
+  return getTauri() !== undefined
 }
 
 const MESSAGE_TO_COMMAND: Record<string, string> = {

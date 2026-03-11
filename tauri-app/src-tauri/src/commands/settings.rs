@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use tauri::{command, AppHandle, Emitter, Manager};
 
 use crate::assets::loader;
-use crate::commands::agent::WatcherState;
 use crate::persistence::{layout, settings};
 use crate::state::app_state::AppState;
 use crate::watcher::global_scanner;
@@ -99,22 +98,36 @@ pub async fn app_ready(app: AppHandle) -> Result<(), String> {
         });
     }
 
-    // 8. Start global session scanner (discovers external Claude sessions)
+    // 8. Start global session scanner (discovers Claude sessions via TTY)
     {
-        let watcher = app.state::<WatcherState>();
-        let mut scan_handle = watcher.global_scan_handle.lock().unwrap();
+        let mut scan_handle = state.global_scan_handle.lock().unwrap();
         if scan_handle.is_none() {
             let handle = global_scanner::start_global_scan(
-                state.known_jsonl_files.clone(),
-                watcher.agents.clone(),
+                state.known_pids.clone(),
+                state.agents.clone(),
                 state.next_agent_id.clone(),
                 state.next_terminal_index.clone(),
-                watcher.waiting_timers.clone(),
-                watcher.permission_timers.clone(),
-                watcher.file_abort_handles.clone(),
                 app.clone(),
             );
             *scan_handle = Some(handle);
+        }
+    }
+
+    // 9. Emit existing agents for webview reload (skip spawn animation)
+    {
+        let lock = state.agents.lock().unwrap();
+        let existing: Vec<_> = lock.values().map(|a| {
+            serde_json::json!({
+                "id": a.id,
+                "isExternal": a.is_external,
+                "folderName": a.folder_name,
+            })
+        }).collect();
+        if !existing.is_empty() {
+            let _ = app.emit("backend-event", serde_json::json!({
+                "type": "existingAgents",
+                "agents": existing,
+            }));
         }
     }
 
@@ -130,7 +143,6 @@ pub async fn save_agent_seats(
     let project_hash = state.project_hash.lock().unwrap().clone();
 
     if let Some(hash) = project_hash {
-        // Convert seats JSON to HashMap
         if let Some(obj) = seats.as_object() {
             let mut seat_map = HashMap::new();
             for (key, val) in obj {

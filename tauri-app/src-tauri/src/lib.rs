@@ -1,13 +1,11 @@
 mod assets;
 mod commands;
-mod parser;
 mod persistence;
-mod pty;
 mod state;
+mod tty;
 mod watcher;
 
-use commands::{agent, assets as asset_cmds, dialog, layout, settings, terminal};
-use pty::manager::PtyManager;
+use commands::{agent, assets as asset_cmds, dialog, layout, settings};
 use state::app_state::AppState;
 
 pub fn run() {
@@ -15,13 +13,13 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .manage(AppState::new())
-        .manage(PtyManager::new())
-        .manage(agent::WatcherState::new())
         .invoke_handler(tauri::generate_handler![
             // Agent lifecycle
             agent::create_agent,
             agent::close_agent,
             agent::focus_agent,
+            agent::list_recent_projects,
+            agent::browse_for_folder,
             // Layout
             layout::save_layout,
             layout::export_layout,
@@ -30,9 +28,6 @@ pub fn run() {
             settings::app_ready,
             settings::save_agent_seats,
             settings::set_sound_enabled,
-            // Terminal
-            terminal::write_pty,
-            terminal::resize_pty,
             // Assets
             asset_cmds::load_assets,
             // Dialog

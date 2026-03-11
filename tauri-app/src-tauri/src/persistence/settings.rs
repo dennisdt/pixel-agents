@@ -62,6 +62,7 @@ pub fn save_settings(settings: &AppSettings) -> Result<(), String> {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn load_agent_seats(project_hash: &str) -> HashMap<String, AgentSeatInfo> {
     let path = agent_seats_file_path(project_hash);
     if !path.exists() {

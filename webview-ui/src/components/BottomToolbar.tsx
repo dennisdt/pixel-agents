@@ -1,7 +1,10 @@
 import { useState, useEffect, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import { SettingsModal } from './SettingsModal.js'
+import { ProjectPickerModal } from './ProjectPickerModal.js'
 import type { WorkspaceFolder } from '../hooks/useExtensionMessages.js'
 import { getBackend } from '../ipc/backend.js'
+import { isTauri } from '../ipc/tauri-backend.js'
 
 interface BottomToolbarProps {
   isEditMode: boolean
@@ -43,7 +46,6 @@ const btnActive: React.CSSProperties = {
   border: '2px solid var(--pixel-accent)',
 }
 
-
 export function BottomToolbar({
   isEditMode,
   onOpenClaude,
@@ -55,8 +57,11 @@ export function BottomToolbar({
   const [hovered, setHovered] = useState<string | null>(null)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [isFolderPickerOpen, setIsFolderPickerOpen] = useState(false)
+  const [isProjectPickerOpen, setIsProjectPickerOpen] = useState(false)
   const [hoveredFolder, setHoveredFolder] = useState<number | null>(null)
   const folderPickerRef = useRef<HTMLDivElement>(null)
+
+  const isTauriApp = isTauri()
 
   // Close folder picker on outside click
   useEffect(() => {
@@ -73,11 +78,18 @@ export function BottomToolbar({
   const hasMultipleFolders = workspaceFolders.length > 1
 
   const handleAgentClick = () => {
-    if (hasMultipleFolders) {
+    if (isTauriApp) {
+      setIsProjectPickerOpen(true)
+    } else if (hasMultipleFolders) {
       setIsFolderPickerOpen((v) => !v)
     } else {
       onOpenClaude()
     }
+  }
+
+  const handleProjectSelect = (folderPath: string) => {
+    setIsProjectPickerOpen(false)
+    getBackend().postMessage({ type: 'openClaude', folderPath })
   }
 
   const handleFolderSelect = (folder: WorkspaceFolder) => {
@@ -179,13 +191,24 @@ export function BottomToolbar({
         >
           Settings
         </button>
+      </div>
+      {createPortal(
         <SettingsModal
           isOpen={isSettingsOpen}
           onClose={() => setIsSettingsOpen(false)}
           isDebugMode={isDebugMode}
           onToggleDebugMode={onToggleDebugMode}
-        />
-      </div>
+        />,
+        document.body,
+      )}
+      {createPortal(
+        <ProjectPickerModal
+          isOpen={isProjectPickerOpen}
+          onClose={() => setIsProjectPickerOpen(false)}
+          onSelect={handleProjectSelect}
+        />,
+        document.body,
+      )}
     </div>
   )
 }
