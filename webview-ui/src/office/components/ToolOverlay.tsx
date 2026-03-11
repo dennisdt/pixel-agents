@@ -3,7 +3,8 @@ import type { ToolActivity } from '../types.js'
 import type { OfficeState } from '../engine/officeState.js'
 import type { SubagentCharacter } from '../../hooks/useExtensionMessages.js'
 import { TILE_SIZE, CharacterState } from '../types.js'
-import { TOOL_OVERLAY_VERTICAL_OFFSET, CHARACTER_SITTING_OFFSET_PX } from '../../constants.js'
+import { TOOL_OVERLAY_VERTICAL_OFFSET, CHARACTER_SITTING_OFFSET_PX, EXP_BAR_WIDTH_PX, EXP_BAR_HEIGHT_PX, EXP_BAR_BG_COLOR, EXP_BAR_FILL_COLOR, EXP_BAR_BORDER_COLOR } from '../../constants.js'
+import { calculateLevel } from '../toolUtils.js'
 
 interface ToolOverlayProps {
   officeState: OfficeState
@@ -13,6 +14,8 @@ interface ToolOverlayProps {
   containerRef: React.RefObject<HTMLDivElement | null>
   zoom: number
   panRef: React.RefObject<{ x: number; y: number }>
+  directoryExp: Record<string, number>
+  agentCwds: Record<number, string>
 }
 
 /** Derive a short human-readable activity string from tools/status */
@@ -47,6 +50,8 @@ export function ToolOverlay({
   containerRef,
   zoom,
   panRef,
+  directoryExp,
+  agentCwds,
 }: ToolOverlayProps) {
   const [, setTick] = useState(0)
   useEffect(() => {
@@ -191,6 +196,27 @@ export function ToolOverlay({
                     {ch.folderName}
                   </span>
                 )}
+                {!isSub && (directoryExp[agentCwds[id]] ?? 0) > 0 && (() => {
+                  const { level, progress } = calculateLevel(directoryExp[agentCwds[id]])
+                  return (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 2 }}>
+                      <span style={{ fontSize: '14px', color: EXP_BAR_FILL_COLOR, fontWeight: 'bold' }}>
+                        Lv.{level}
+                      </span>
+                      <div style={{
+                        width: EXP_BAR_WIDTH_PX, height: EXP_BAR_HEIGHT_PX,
+                        background: EXP_BAR_BG_COLOR,
+                        border: `1px solid ${EXP_BAR_BORDER_COLOR}`,
+                        overflow: 'hidden',
+                      }}>
+                        <div style={{
+                          width: `${Math.floor(progress * 100)}%`,
+                          height: '100%', background: EXP_BAR_FILL_COLOR,
+                        }} />
+                      </div>
+                    </div>
+                  )
+                })()}
               </div>
             </div>
           </div>

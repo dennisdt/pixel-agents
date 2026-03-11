@@ -32,6 +32,10 @@ pub enum JsonlEvent {
         parent_tool_id: String,
         tool_id: String,
     },
+    /// Token usage from an assistant response.
+    TokenUsage {
+        output_tokens: u64,
+    },
 }
 
 pub struct JsonlReader {
@@ -172,20 +176,36 @@ fn extract_tool_done_ids(content: &[serde_json::Value]) -> Vec<String> {
         .collect()
 }
 
-/// Extract tool_use blocks from a primary `assistant` record.
+/// Extract tool_use blocks and token usage from a primary `assistant` record.
 fn process_assistant_record(record: &serde_json::Value) -> Vec<JsonlEvent> {
-    let Some(content) = record
+    let mut events = Vec::new();
+
+    // Extract output_tokens from usage
+    if let Some(output_tokens) = record
+        .get("message")
+        .and_then(|m| m.get("usage"))
+        .and_then(|u| u.get("output_tokens"))
+        .and_then(|v| v.as_u64())
+    {
+        if output_tokens > 0 {
+            events.push(JsonlEvent::TokenUsage { output_tokens });
+        }
+    }
+
+    // Extract tool_use blocks
+    if let Some(content) = record
         .get("message")
         .and_then(|m| m.get("content"))
         .and_then(|c| c.as_array())
-    else {
-        return vec![];
-    };
+    {
+        events.extend(
+            extract_tool_starts(content)
+                .into_iter()
+                .map(|(tool_id, tool_name, status)| JsonlEvent::ToolStart { tool_id, tool_name, status }),
+        );
+    }
 
-    extract_tool_starts(content)
-        .into_iter()
-        .map(|(tool_id, tool_name, status)| JsonlEvent::ToolStart { tool_id, tool_name, status })
-        .collect()
+    events
 }
 
 /// Extract tool_result blocks from a primary `user` record.

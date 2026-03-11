@@ -96,6 +96,15 @@ export const NOTIFICATION_NOTE_2_START_SEC = 0.1
 export const NOTIFICATION_NOTE_DURATION_SEC = 0.18
 export const NOTIFICATION_VOLUME = 0.14
 
+// ── Leveling / EXP ──────────────────────────────────────────
+export const EXP_BASE = 1000
+export const EXP_GROWTH_FACTOR = 1.5
+export const EXP_BAR_WIDTH_PX = 60
+export const EXP_BAR_HEIGHT_PX = 4
+export const EXP_BAR_BG_COLOR = 'rgba(255, 255, 255, 0.15)'
+export const EXP_BAR_FILL_COLOR = '#5ac88c'
+export const EXP_BAR_BORDER_COLOR = 'rgba(255, 255, 255, 0.3)'
+
 // ── Game Logic ───────────────────────────────────────────────
 export const MAX_DELTA_TIME_SEC = 0.1
 export const WAITING_BUBBLE_DURATION_SEC = 2.0

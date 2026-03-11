@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use tauri::{command, AppHandle, Emitter, Manager};
 
 use crate::assets::loader;
-use crate::persistence::{layout, settings};
+use crate::persistence::{directory_stats, layout, settings};
 use crate::state::app_state::AppState;
 use crate::watcher::global_scanner;
 
@@ -107,6 +107,8 @@ pub async fn app_ready(app: AppHandle) -> Result<(), String> {
                 state.agents.clone(),
                 state.next_agent_id.clone(),
                 state.next_terminal_index.clone(),
+                state.directory_stats.clone(),
+                state.directory_stats_dirty.clone(),
                 app.clone(),
             );
             *scan_handle = Some(handle);
@@ -121,6 +123,7 @@ pub async fn app_ready(app: AppHandle) -> Result<(), String> {
                 "id": a.id,
                 "isExternal": a.is_external,
                 "folderName": a.folder_name,
+                "cwd": a.cwd,
             })
         }).collect();
         if !existing.is_empty() {
@@ -129,6 +132,16 @@ pub async fn app_ready(app: AppHandle) -> Result<(), String> {
                 "agents": existing,
             }));
         }
+    }
+
+    // 10. Load and emit directory EXP stats
+    {
+        let stats = directory_stats::load_directory_stats();
+        *state.directory_stats.lock().unwrap() = stats.clone();
+        let _ = app.emit("backend-event", serde_json::json!({
+            "type": "directoryExpAll",
+            "stats": stats,
+        }));
     }
 
     Ok(())

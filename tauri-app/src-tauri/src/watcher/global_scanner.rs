@@ -1,10 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use tokio::task::JoinHandle;
 
+use crate::persistence::directory_stats;
 use crate::state::agent_state::AgentState;
 use crate::tty::jsonl_subagent::{JsonlEvent, JsonlReader};
 use crate::tty::parser::{self, AgentActivity};
@@ -22,6 +24,7 @@ pub struct ClaudeProcess {
 const GLOBAL_SCAN_INTERVAL_MS: u64 = 2000;
 const STALE_THRESHOLD: u32 = 2;
 const TOOL_DONE_DELAY_MS: u64 = 300;
+const STATS_SAVE_INTERVAL_SECS: u64 = 30;
 
 /// Scan `ps` for all running claude processes and return their info.
 /// Uses a single batched `lsof` call for all discovered PIDs.
@@ -239,9 +242,12 @@ pub fn start_global_scan(
     agents: Arc<Mutex<HashMap<u32, AgentState>>>,
     next_agent_id: Arc<Mutex<u32>>,
     next_terminal_index: Arc<Mutex<u32>>,
+    directory_stats: Arc<Mutex<HashMap<String, u64>>>,
+    directory_stats_dirty: Arc<AtomicBool>,
     app: AppHandle,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let mut last_stats_save = Instant::now();
         loop {
             tokio::time::sleep(Duration::from_millis(GLOBAL_SCAN_INTERVAL_MS)).await;
 
@@ -342,6 +348,7 @@ pub fn start_global_scan(
                     "id": agent_id,
                     "isExternal": true,
                     "folderName": folder_name,
+                    "cwd": proc.cwd,
                 }));
 
                 // Agent discovered and created
@@ -406,7 +413,7 @@ pub fn start_global_scan(
                 );
 
                 // Read JSONL for detailed tool tracking (primary + subagent)
-                handle_jsonl_events(agent_id, &agents, &app);
+                handle_jsonl_events(agent_id, &agents, &directory_stats, &directory_stats_dirty, &app);
             }
 
             // Cleanup agents whose PID is gone
@@ -445,6 +452,18 @@ pub fn start_global_scan(
                     "type": "agentClosed",
                     "id": id,
                 }));
+            }
+
+            // Periodic save of directory stats
+            if directory_stats_dirty.load(Ordering::SeqCst)
+                && last_stats_save.elapsed() >= Duration::from_secs(STATS_SAVE_INTERVAL_SECS)
+            {
+                directory_stats_dirty.store(false, Ordering::SeqCst);
+                let snapshot = directory_stats.lock().unwrap().clone();
+                tokio::task::spawn_blocking(move || {
+                    let _ = directory_stats::save_directory_stats(&snapshot);
+                });
+                last_stats_save = Instant::now();
             }
         }
     })
@@ -512,6 +531,8 @@ fn emit_state_transitions(
 fn handle_jsonl_events(
     agent_id: u32,
     agents: &Arc<Mutex<HashMap<u32, AgentState>>>,
+    directory_stats: &Arc<Mutex<HashMap<String, u64>>>,
+    directory_stats_dirty: &Arc<AtomicBool>,
     app: &AppHandle,
 ) {
     let events = {
@@ -617,6 +638,24 @@ fn handle_jsonl_events(
                         "toolId": tool_id,
                     }));
                 });
+            }
+            JsonlEvent::TokenUsage { output_tokens } => {
+                let cwd = agents.lock().unwrap().get(&agent_id)
+                    .and_then(|a| a.cwd.clone());
+                if let Some(dir) = cwd {
+                    let new_total = {
+                        let mut stats = directory_stats.lock().unwrap();
+                        let total = stats.entry(dir.clone()).or_insert(0);
+                        *total += output_tokens;
+                        *total
+                    };
+                    directory_stats_dirty.store(true, Ordering::SeqCst);
+                    emit(app, serde_json::json!({
+                        "type": "directoryExp",
+                        "directory": dir,
+                        "totalExp": new_total,
+                    }));
+                }
             }
         }
     }

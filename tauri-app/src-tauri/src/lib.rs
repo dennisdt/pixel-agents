@@ -5,7 +5,12 @@ mod state;
 mod tty;
 mod watcher;
 
+use std::sync::atomic::Ordering;
+
+use tauri::Manager;
+
 use commands::{agent, assets as asset_cmds, dialog, layout, settings};
+use persistence::directory_stats;
 use state::app_state::AppState;
 
 pub fn run() {
@@ -33,6 +38,15 @@ pub fn run() {
             // Dialog
             dialog::open_sessions_folder,
         ])
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                let state = window.state::<AppState>();
+                if state.directory_stats_dirty.load(Ordering::SeqCst) {
+                    let snapshot = state.directory_stats.lock().unwrap().clone();
+                    let _ = directory_stats::save_directory_stats(&snapshot);
+                }
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

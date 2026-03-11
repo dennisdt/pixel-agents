@@ -1,3 +1,5 @@
+import { ZOOM_DEFAULT_DPR_FACTOR, ZOOM_MIN, EXP_BASE, EXP_GROWTH_FACTOR } from '../constants.js'
+
 /** Map status prefixes back to tool names for animation selection */
 export const STATUS_TO_TOOL: Record<string, string> = {
   'Reading': 'Read',
@@ -19,7 +21,23 @@ export function extractToolName(status: string): string | null {
   return first || null
 }
 
-import { ZOOM_DEFAULT_DPR_FACTOR, ZOOM_MIN } from '../constants.js'
+export function calculateLevel(totalExp: number): {
+  level: number
+  currentLevelExp: number
+  nextLevelExp: number
+  progress: number
+} {
+  let level = 1
+  let expConsumed = 0
+  let threshold = EXP_BASE
+  while (expConsumed + threshold <= totalExp) {
+    expConsumed += threshold
+    level++
+    threshold = Math.floor(EXP_BASE * Math.pow(EXP_GROWTH_FACTOR, level - 1))
+  }
+  const currentLevelExp = totalExp - expConsumed
+  return { level, currentLevelExp, nextLevelExp: threshold, progress: threshold > 0 ? currentLevelExp / threshold : 0 }
+}
 
 /** Compute a default integer zoom level (device pixels per sprite pixel) */
 export function defaultZoom(): number {

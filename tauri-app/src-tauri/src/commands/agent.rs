@@ -63,6 +63,7 @@ pub async fn create_agent(
         serde_json::json!({
             "type": "agentCreated",
             "id": id,
+            "cwd": cwd,
         }),
     );
 

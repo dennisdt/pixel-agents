@@ -52,6 +52,8 @@ export interface ExtensionMessageState {
   workspaceFolders: WorkspaceFolder[]
   externalAgentIds: Set<number>
   agentFolderNames: Record<number, string>
+  directoryExp: Record<string, number>
+  agentCwds: Record<number, string>
 }
 
 function saveAgentSeats(os: OfficeState): void {
@@ -79,6 +81,8 @@ export function useExtensionMessages(
   const [workspaceFolders, setWorkspaceFolders] = useState<WorkspaceFolder[]>([])
   const [externalAgentIds, setExternalAgentIds] = useState<Set<number>>(new Set())
   const [agentFolderNames, setAgentFolderNames] = useState<Record<number, string>>({})
+  const [directoryExp, setDirectoryExp] = useState<Record<string, number>>({})
+  const [agentCwds, setAgentCwds] = useState<Record<number, string>>({})
 
   // Track whether initial layout has been loaded (ref to avoid re-render)
   const layoutReadyRef = useRef(false)
@@ -119,9 +123,13 @@ export function useExtensionMessages(
         const id = msg.id as number
         const folderName = msg.folderName as string | undefined
         const isExternal = msg.isExternal as boolean | undefined
+        const cwd = msg.cwd as string | undefined
         setAgents((prev) => (prev.includes(id) ? prev : [...prev, id]))
         if (folderName) {
           setAgentFolderNames((prev) => ({ ...prev, [id]: folderName }))
+        }
+        if (cwd) {
+          setAgentCwds((prev) => ({ ...prev, [id]: cwd }))
         }
         if (isExternal) {
           setExternalAgentIds((prev) => { const next = new Set(prev); next.add(id); return next })
@@ -136,6 +144,12 @@ export function useExtensionMessages(
         setSelectedAgent((prev) => (prev === id ? null : prev))
         setExternalAgentIds((prev) => { if (!prev.has(id)) return prev; const next = new Set(prev); next.delete(id); return next })
         setAgentFolderNames((prev) => {
+          if (!(id in prev)) return prev
+          const next = { ...prev }
+          delete next[id]
+          return next
+        })
+        setAgentCwds((prev) => {
           if (!(id in prev)) return prev
           const next = { ...prev }
           delete next[id]
@@ -164,26 +178,43 @@ export function useExtensionMessages(
         setSubagentCharacters((prev) => prev.filter((s) => s.parentAgentId !== id))
         os.removeAgent(id)
       } else if (msg.type === 'existingAgents') {
-        const incoming = msg.agents as number[]
+        // Tauri sends agents as [{id, isExternal, folderName, cwd}], VS Code sends number[]
+        const rawAgents = msg.agents as Array<number | Record<string, unknown>>
         const meta = (msg.agentMeta || {}) as Record<number, { palette?: number; hueShift?: number; seatId?: string }>
         const folderNames = (msg.folderNames || {}) as Record<number, string>
+        const cwdUpdates: Record<number, string> = {}
+        const folderNameUpdates: Record<number, string> = {}
+        const agentIds: number[] = []
+        for (const item of rawAgents) {
+          if (typeof item === 'number') {
+            agentIds.push(item)
+          } else if (item && typeof item === 'object' && typeof item.id === 'number') {
+            agentIds.push(item.id)
+            if (typeof item.cwd === 'string') cwdUpdates[item.id] = item.cwd
+            if (typeof item.folderName === 'string') folderNameUpdates[item.id] = item.folderName
+          }
+        }
         // Buffer agents — they'll be added in layoutLoaded after seats are built
-        for (const id of incoming) {
+        for (const id of agentIds) {
           const m = meta[id]
-          pendingAgents.push({ id, palette: m?.palette, hueShift: m?.hueShift, seatId: m?.seatId, folderName: folderNames[id] })
+          pendingAgents.push({ id, palette: m?.palette, hueShift: m?.hueShift, seatId: m?.seatId, folderName: folderNames[id] ?? folderNameUpdates[id] })
         }
         setAgents((prev) => {
           const ids = new Set(prev)
           const merged = [...prev]
-          for (const id of incoming) {
+          for (const id of agentIds) {
             if (!ids.has(id)) {
               merged.push(id)
             }
           }
           return merged.sort((a, b) => a - b)
         })
-        if (Object.keys(folderNames).length > 0) {
-          setAgentFolderNames((prev) => ({ ...prev, ...folderNames }))
+        const allFolderNames = { ...folderNames, ...folderNameUpdates }
+        if (Object.keys(allFolderNames).length > 0) {
+          setAgentFolderNames((prev) => ({ ...prev, ...allFolderNames }))
+        }
+        if (Object.keys(cwdUpdates).length > 0) {
+          setAgentCwds((prev) => ({ ...prev, ...cwdUpdates }))
         }
       } else if (msg.type === 'agentToolStart') {
         const id = msg.id as number
@@ -363,6 +394,10 @@ export function useExtensionMessages(
       } else if (msg.type === 'settingsLoaded') {
         const soundOn = msg.soundEnabled as boolean
         setSoundEnabled(soundOn)
+      } else if (msg.type === 'directoryExpAll') {
+        setDirectoryExp(msg.stats as Record<string, number>)
+      } else if (msg.type === 'directoryExp') {
+        setDirectoryExp((prev) => ({ ...prev, [msg.directory as string]: msg.totalExp as number }))
       } else if (msg.type === 'furnitureAssetsLoaded') {
         try {
           const catalog = msg.catalog as FurnitureAsset[]
@@ -381,5 +416,5 @@ export function useExtensionMessages(
     return unsubscribe
   }, [getOfficeState])
 
-  return { agents, selectedAgent, agentTools, agentStatuses, subagentTools, subagentCharacters, layoutReady, loadedAssets, workspaceFolders, externalAgentIds, agentFolderNames }
+  return { agents, selectedAgent, agentTools, agentStatuses, subagentTools, subagentCharacters, layoutReady, loadedAssets, workspaceFolders, externalAgentIds, agentFolderNames, directoryExp, agentCwds }
 }

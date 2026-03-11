@@ -14,6 +14,8 @@ pub struct AppState {
     pub layout_skip_flag: Arc<AtomicBool>,
     pub project_hash: Mutex<Option<String>>,
     pub global_scan_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    pub directory_stats: Arc<Mutex<HashMap<String, u64>>>,
+    pub directory_stats_dirty: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -27,6 +29,8 @@ impl AppState {
             layout_skip_flag: Arc::new(AtomicBool::new(false)),
             project_hash: Mutex::new(None),
             global_scan_handle: Mutex::new(None),
+            directory_stats: Arc::new(Mutex::new(HashMap::new())),
+            directory_stats_dirty: Arc::new(AtomicBool::new(false)),
         }
     }
 }
