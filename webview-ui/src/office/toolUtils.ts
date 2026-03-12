@@ -29,6 +29,7 @@ function getGrowthForLevel(level: number): number {
   return EXP_TIERS[EXP_TIERS.length - 1].growth
 }
 
+/** Convert cumulative EXP into level, progress within current level, and threshold for next. */
 export function calculateLevel(totalExp: number): {
   level: number
   currentLevelExp: number
