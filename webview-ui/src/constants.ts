@@ -97,7 +97,7 @@ export const NOTIFICATION_NOTE_DURATION_SEC = 0.18
 export const NOTIFICATION_VOLUME = 0.14
 
 // ── Leveling / EXP ──────────────────────────────────────────
-export const EXP_BASE_COST = 1000
+export const EXP_BASE_COST = 5000
 export const EXP_TIERS = [
   { maxLevel:  5, growth: 1.5  },
   { maxLevel: 10, growth: 1.35 },
