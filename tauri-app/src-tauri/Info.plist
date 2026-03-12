@@ -4,5 +4,7 @@
 <dict>
 	<key>NSRequiresAquaSystemAppearance</key>
 	<false/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Pixel Agents needs to control Terminal.app to launch and focus Claude sessions.</string>
 </dict>
 </plist>
