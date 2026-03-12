@@ -135,7 +135,7 @@ pub async fn focus_agent(app: AppHandle, id: u32) -> Result<(), String> {
                 p.session_id.as_deref() == Some(&session_id)
                     || p.project_dir_hash == project_hash
             })
-            .map(|p| p.tty.clone())
+            .and_then(|p| p.tty.clone())
     } else {
         None
     };

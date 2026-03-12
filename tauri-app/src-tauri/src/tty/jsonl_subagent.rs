@@ -57,27 +57,27 @@ impl JsonlReader {
     /// Read new events, auto-discovering the latest JSONL file in `project_dir`.
     /// If the active file changes (e.g., after `/clear`), resets to read the new file from the start.
     pub fn read_events_from_project(&mut self, project_dir: &Path) -> Vec<JsonlEvent> {
-        let latest = match find_latest_jsonl(project_dir) {
+        let target = match find_latest_jsonl(project_dir) {
             Some(p) => p,
             None => return vec![],
         };
 
         // Detect file change (new session or /clear)
-        if self.current_file.as_ref() != Some(&latest) {
+        if self.current_file.as_ref() != Some(&target) {
             if self.current_file.is_some() {
                 // File changed — reset to read new file from start
                 self.file_offset = 0;
                 self.line_buffer.clear();
             } else {
                 // First time — seek to end so we only read new records
-                if let Ok(stat) = std::fs::metadata(&latest) {
+                if let Ok(stat) = std::fs::metadata(&target) {
                     self.file_offset = stat.len();
                 }
             }
-            self.current_file = Some(latest.clone());
+            self.current_file = Some(target.clone());
         }
 
-        self.read_events(&latest)
+        self.read_events(&target)
     }
 
     /// Read new records from the JSONL file since last offset.
@@ -318,3 +318,4 @@ pub fn find_latest_jsonl(project_dir: &Path) -> Option<PathBuf> {
     }
     best.map(|(p, _)| p)
 }
+

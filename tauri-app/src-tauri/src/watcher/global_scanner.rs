@@ -15,7 +15,7 @@ use crate::tty::{self, reader};
 /// Info about a running claude process.
 pub struct ClaudeProcess {
     pub pid: u32,
-    pub tty: String,
+    pub tty: Option<String>,
     pub project_dir_hash: String,
     pub session_id: Option<String>,
     pub cwd: String,
@@ -49,16 +49,22 @@ pub fn get_running_claude_processes() -> Vec<ClaudeProcess> {
             continue;
         };
         let tty = parts[1];
-        if tty == "??" || tty == "TTY" {
-            continue;
+        if tty == "TTY" {
+            continue; // Skip the header row only
         }
+
+        let tty_path = if tty == "??" {
+            None
+        } else {
+            Some(format!("/dev/{}", tty))
+        };
 
         let session_id = parts
             .windows(2)
             .find(|w| w[0] == "--session-id")
             .map(|w| w[1].to_string());
 
-        candidates.push((pid, format!("/dev/{}", tty), session_id));
+        candidates.push((pid, tty_path, session_id));
     }
 
     if candidates.is_empty() {
@@ -75,11 +81,11 @@ pub fn get_running_claude_processes() -> Vec<ClaudeProcess> {
 
     candidates
         .into_iter()
-        .filter_map(|(pid, tty, session_id)| {
+        .filter_map(|(pid, tty_path, session_id)| {
             let cwd = cwds.get(&pid)?.clone();
             Some(ClaudeProcess {
                 pid,
-                tty,
+                tty: tty_path,
                 project_dir_hash: tty::hash_path(std::path::Path::new(&cwd)),
                 session_id,
                 cwd,
@@ -287,7 +293,7 @@ pub fn start_global_scan(
                     if let Some(id) = existing_id {
                         if let Some(agent) = lock.get_mut(&id) {
                             agent.pid = Some(proc.pid);
-                            agent.tty = Some(proc.tty.clone());
+                            agent.tty = proc.tty.clone();
                             if agent.cwd.is_none() {
                                 agent.cwd = Some(proc.cwd.clone());
                             }
@@ -338,7 +344,7 @@ pub fn start_global_scan(
                 agent.is_external = true;
                 agent.folder_name = Some(folder_name.clone());
                 agent.pid = Some(proc.pid);
-                agent.tty = Some(proc.tty.clone());
+                agent.tty = proc.tty.clone();
                 agent.cwd = Some(proc.cwd.clone());
 
                 agents.lock().unwrap().insert(agent_id, agent);
@@ -350,8 +356,6 @@ pub fn start_global_scan(
                     "folderName": folder_name,
                     "cwd": proc.cwd,
                 }));
-
-                // Agent discovered and created
             }
 
             // Batch read all terminal screen contents
@@ -366,53 +370,51 @@ pub fn start_global_scan(
             };
 
             for (agent_id, tty, last_hash, last_activity) in agent_snapshots {
-                let Some(ref tty_path) = tty else {
-                    continue;
-                };
-                let Some(content) = histories.get(tty_path) else {
-                    continue;
-                };
+                // TTY screen parsing — only for agents with a TTY (Terminal.app)
+                if let Some(tty_path) = &tty {
+                    if let Some(content) = histories.get(tty_path) {
+                        let new_activity = parser::parse_terminal_state(content);
+                        let new_hash = parser::content_fingerprint(content);
+                        // Definitive active signal from Claude's TUI — only present when processing.
+                        let confirmed_active = content.contains(parser::ACTIVE_SENTINEL);
 
-                let new_activity = parser::parse_terminal_state(content);
-                let new_hash = parser::content_fingerprint(content);
-                // Definitive active signal from Claude's TUI — only present when processing.
-                let confirmed_active = content.contains(parser::ACTIVE_SENTINEL);
+                        // Staleness detection + activity update in a single lock
+                        let effective_activity = {
+                            let mut lock = agents.lock().unwrap();
+                            let Some(agent) = lock.get_mut(&agent_id) else {
+                                continue;
+                            };
 
-                // Staleness detection + activity update in a single lock
-                let effective_activity = {
-                    let mut lock = agents.lock().unwrap();
-                    let Some(agent) = lock.get_mut(&agent_id) else {
-                        continue;
-                    };
+                            let activity = if new_hash == last_hash {
+                                agent.stale_count += 1;
+                                if agent.stale_count >= STALE_THRESHOLD && !confirmed_active {
+                                    match &new_activity {
+                                        AgentActivity::Thinking | AgentActivity::Unknown => AgentActivity::Waiting,
+                                        _ => new_activity.clone(),
+                                    }
+                                } else {
+                                    new_activity.clone()
+                                }
+                            } else {
+                                agent.stale_count = 0;
+                                agent.last_content_hash = new_hash;
+                                new_activity.clone()
+                            };
 
-                    let activity = if new_hash == last_hash {
-                        agent.stale_count += 1;
-                        if agent.stale_count >= STALE_THRESHOLD && !confirmed_active {
-                            match &new_activity {
-                                AgentActivity::Thinking | AgentActivity::Unknown => AgentActivity::Waiting,
-                                _ => new_activity.clone(),
-                            }
-                        } else {
-                            new_activity.clone()
-                        }
-                    } else {
-                        agent.stale_count = 0;
-                        agent.last_content_hash = new_hash;
-                        new_activity.clone()
-                    };
+                            agent.last_activity = Some(activity.clone());
+                            activity
+                        };
 
-                    agent.last_activity = Some(activity.clone());
-                    activity
-                };
+                        emit_state_transitions(
+                            agent_id,
+                            &last_activity,
+                            &effective_activity,
+                            &app,
+                        );
+                    }
+                }
 
-                emit_state_transitions(
-                    agent_id,
-                    &last_activity,
-                    &effective_activity,
-                    &app,
-                );
-
-                // Read JSONL for detailed tool tracking (primary + subagent)
+                // JSONL tool tracking runs for all agents (including TTY-less ones)
                 handle_jsonl_events(agent_id, &agents, &directory_stats, &directory_stats_dirty, &app);
             }
 
@@ -538,10 +540,7 @@ fn handle_jsonl_events(
     let events = {
         let mut lock = agents.lock().unwrap();
         let Some(agent) = lock.get_mut(&agent_id) else { return };
-        if agent.jsonl_reader.is_none() {
-            agent.jsonl_reader = Some(JsonlReader::new());
-        }
-        let reader = agent.jsonl_reader.as_mut().unwrap();
+        let reader = agent.jsonl_reader.get_or_insert_with(JsonlReader::new);
         reader.read_events_from_project(&agent.project_dir)
     };
 

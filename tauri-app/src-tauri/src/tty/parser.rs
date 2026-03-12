@@ -220,6 +220,18 @@ pub fn format_tool_status(activity: &AgentActivity) -> Option<String> {
                         }
                     }
                 }
+                "Agent" => {
+                    if args.is_empty() {
+                        "Running agent".into()
+                    } else {
+                        let truncated = truncate_chars(args, TASK_DESC_MAX);
+                        if truncated.len() < args.len() {
+                            format!("Agent: {}\u{2026}", truncated)
+                        } else {
+                            format!("Agent: {}", args)
+                        }
+                    }
+                }
                 "AskUserQuestion" => "Waiting for your answer".into(),
                 "EnterPlanMode" => "Planning".into(),
                 "NotebookEdit" => "Editing notebook".into(),
