@@ -4,6 +4,9 @@ import { getCachedSprite, getOutlineSprite } from '../sprites/spriteCache.js'
 import { getCharacterSprites, BUBBLE_PERMISSION_SPRITE, BUBBLE_WAITING_SPRITE } from '../sprites/spriteData.js'
 import { getCharacterSprite } from './characters.js'
 import { renderMatrixEffect } from './matrixEffect.js'
+import { renderAura } from './auraEffect.js'
+import { getAccessoryData } from '../sprites/accessories.js'
+import { getAccessoryForLevel, getAuraForLevel } from '../toolUtils.js'
 import { getColorizedFloorSprite, hasFloorSprites, WALL_COLOR } from '../floorTiles.js'
 import { hasWallSprites, getWallInstances, wallColorToHex } from '../wallTiles.js'
 import {
@@ -137,14 +140,10 @@ export function renderScene(
 
     // Matrix spawn/despawn effect — skip outline, use per-pixel rendering
     if (ch.matrixEffect) {
-      const mDrawX = drawX
-      const mDrawY = drawY
-      const mSpriteData = spriteData
-      const mCh = ch
       drawables.push({
         zY: charZY,
         draw: (c) => {
-          renderMatrixEffect(c, mCh, mSpriteData, mDrawX, mDrawY, zoom)
+          renderMatrixEffect(c, ch, spriteData, drawX, drawY, zoom)
         },
       })
       continue
@@ -176,6 +175,37 @@ export function renderScene(
         c.drawImage(cached, drawX, drawY)
       },
     })
+
+    // Aura effect (behind character, lower z) + accessory (on top, higher z)
+    if (ch.level > 1 && !ch.isSubagent) {
+      const auraId = getAuraForLevel(ch.level)
+      if (auraId) {
+        const spriteW = cached.width
+        const spriteH = cached.height
+        drawables.push({
+          zY: charZY - OUTLINE_Z_SORT_OFFSET * 0.5,
+          draw: (c) => {
+            renderAura(c, auraId, drawX, drawY, spriteW, spriteH, zoom, ch.auraTimer)
+          },
+        })
+      }
+
+      const accId = getAccessoryForLevel(ch.level)
+      if (accId) {
+        const accData = getAccessoryData(accId, ch.dir)
+        if (accData) {
+          const accCached = getCachedSprite(accData.sprite, zoom)
+          const accX = drawX + accData.dx * zoom
+          const accY = drawY + accData.dy * zoom
+          drawables.push({
+            zY: charZY + OUTLINE_Z_SORT_OFFSET * 0.5,
+            draw: (c) => {
+              c.drawImage(accCached, accX, accY)
+            },
+          })
+        }
+      }
+    }
   }
 
   // Sort by Y (lower = in front = drawn later)

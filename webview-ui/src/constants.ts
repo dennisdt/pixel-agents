@@ -111,6 +111,53 @@ export const EXP_BAR_BG_COLOR = 'rgba(255, 255, 255, 0.15)'
 export const EXP_BAR_FILL_COLOR = '#5ac88c'
 export const EXP_BAR_BORDER_COLOR = 'rgba(255, 255, 255, 0.3)'
 
+// ── Leveling Rewards ────────────────────────────────────────
+export const LEVEL_TITLES = [
+  { level: 1,  title: 'Intern',       color: '#888888' },
+  { level: 5,  title: 'Junior',       color: '#cccccc' },
+  { level: 8,  title: 'Developer',    color: '#5ac88c' },
+  { level: 12, title: 'Senior',       color: '#5a9ec8' },
+  { level: 16, title: 'Staff',        color: '#8a5ac8' },
+  { level: 20, title: 'Principal',    color: '#c8a85a' },
+  { level: 25, title: 'Architect',    color: '#ff7b5a' },
+  { level: 30, title: 'Fellow',       color: '#ff5a8a' },
+  { level: 35, title: 'Legend',       color: '#ffd700' },
+  { level: 40, title: 'Mythic',       color: '#ff4500' },
+  { level: 50, title: 'Transcendent', color: '#00ffcc' },
+] as const
+
+export const LEVEL_ACCESSORIES = [
+  { level: 5,  id: 'glasses' },
+  { level: 10, id: 'headband' },
+  { level: 15, id: 'hardhat' },
+  { level: 25, id: 'crown' },
+  { level: 35, id: 'halo' },
+  { level: 40, id: 'horns' },
+  { level: 50, id: 'wings' },
+] as const
+
+export const LEVEL_AURAS = [
+  { level: 8,  id: 'sparkle' },
+  { level: 15, id: 'glow' },
+  { level: 25, id: 'flame' },
+  { level: 35, id: 'rainbow' },
+  { level: 40, id: 'lightning' },
+  { level: 50, id: 'cosmic' },
+] as const
+
+// Aura animation constants
+export const AURA_SPARKLE_COUNT = 5
+export const AURA_SPARKLE_CYCLE_SEC = 0.8
+export const AURA_GLOW_ALPHA = 0.3
+export const AURA_GLOW_PIXEL_COUNT = 6
+export const AURA_FLAME_SPEED = 24
+export const AURA_FLAME_COUNT = 3
+export const AURA_RAINBOW_CYCLE_SEC = 2.0
+export const AURA_LIGHTNING_BURST_SEC = 1.5
+export const AURA_LIGHTNING_FLASH_SEC = 0.1
+export const AURA_COSMIC_ORBIT_SPEED = 1.2
+export const AURA_COSMIC_STAR_COUNT = 5
+
 // ── Game Logic ───────────────────────────────────────────────
 export const MAX_DELTA_TIME_SEC = 0.1
 export const WAITING_BUBBLE_DURATION_SEC = 2.0

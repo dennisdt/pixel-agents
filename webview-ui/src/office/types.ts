@@ -195,4 +195,8 @@ export interface Character {
   matrixEffectSeeds: number[]
   /** Workspace folder name (only set for multi-root workspaces) */
   folderName?: string
+  /** Current level derived from directory EXP (default 1) */
+  level: number
+  /** Monotonically increasing timer for aura animation (seconds) */
+  auraTimer: number
 }

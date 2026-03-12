@@ -633,6 +633,9 @@ export class OfficeState {
         continue // skip normal FSM while effect is active
       }
 
+      // Increment aura animation timer
+      ch.auraTimer += dt
+
       // Temporarily unblock own seat so character can pathfind to it
       this.withOwnSeatUnblocked(ch, () =>
         updateCharacter(ch, dt, this.walkableTiles, this.seats, this.tileMap, this.blockedTiles)

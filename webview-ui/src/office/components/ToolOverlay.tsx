@@ -4,7 +4,7 @@ import type { OfficeState } from '../engine/officeState.js'
 import type { SubagentCharacter } from '../../hooks/useExtensionMessages.js'
 import { TILE_SIZE, CharacterState } from '../types.js'
 import { TOOL_OVERLAY_VERTICAL_OFFSET, CHARACTER_SITTING_OFFSET_PX, EXP_BAR_WIDTH_PX, EXP_BAR_HEIGHT_PX, EXP_BAR_BG_COLOR, EXP_BAR_FILL_COLOR, EXP_BAR_BORDER_COLOR } from '../../constants.js'
-import { calculateLevel } from '../toolUtils.js'
+import { calculateLevel, getTitleForLevel } from '../toolUtils.js'
 
 interface ToolOverlayProps {
   officeState: OfficeState
@@ -40,6 +40,33 @@ function getActivityText(
   }
 
   return isActive ? 'Thinking\u2026' : 'Idle'
+}
+
+function LevelBadge({ exp }: { exp: number }) {
+  if (exp <= 0) return null
+  const { level, progress } = calculateLevel(exp)
+  const { title, color: titleColor } = getTitleForLevel(level)
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 2 }}>
+      <span style={{ fontSize: '14px', color: EXP_BAR_FILL_COLOR, fontWeight: 'bold' }}>
+        Lv.{level}
+      </span>
+      <span style={{ fontSize: '13px', color: titleColor, fontWeight: 'bold' }}>
+        {title}
+      </span>
+      <div style={{
+        width: EXP_BAR_WIDTH_PX, height: EXP_BAR_HEIGHT_PX,
+        background: EXP_BAR_BG_COLOR,
+        border: `1px solid ${EXP_BAR_BORDER_COLOR}`,
+        overflow: 'hidden',
+      }}>
+        <div style={{
+          width: `${Math.floor(progress * 100)}%`,
+          height: '100%', background: EXP_BAR_FILL_COLOR,
+        }} />
+      </div>
+    </div>
+  )
 }
 
 export function ToolOverlay({
@@ -196,27 +223,7 @@ export function ToolOverlay({
                     {ch.folderName}
                   </span>
                 )}
-                {!isSub && (directoryExp[agentCwds[id]] ?? 0) > 0 && (() => {
-                  const { level, progress } = calculateLevel(directoryExp[agentCwds[id]])
-                  return (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 2 }}>
-                      <span style={{ fontSize: '14px', color: EXP_BAR_FILL_COLOR, fontWeight: 'bold' }}>
-                        Lv.{level}
-                      </span>
-                      <div style={{
-                        width: EXP_BAR_WIDTH_PX, height: EXP_BAR_HEIGHT_PX,
-                        background: EXP_BAR_BG_COLOR,
-                        border: `1px solid ${EXP_BAR_BORDER_COLOR}`,
-                        overflow: 'hidden',
-                      }}>
-                        <div style={{
-                          width: `${Math.floor(progress * 100)}%`,
-                          height: '100%', background: EXP_BAR_FILL_COLOR,
-                        }} />
-                      </div>
-                    </div>
-                  )
-                })()}
+                {!isSub && <LevelBadge exp={directoryExp[agentCwds[id]] ?? 0} />}
               </div>
             </div>
           </div>

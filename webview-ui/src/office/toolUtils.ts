@@ -1,4 +1,4 @@
-import { ZOOM_DEFAULT_DPR_FACTOR, ZOOM_MIN, EXP_BASE_COST, EXP_TIERS } from '../constants.js'
+import { ZOOM_DEFAULT_DPR_FACTOR, ZOOM_MIN, EXP_BASE_COST, EXP_TIERS, LEVEL_TITLES, LEVEL_ACCESSORIES, LEVEL_AURAS } from '../constants.js'
 
 /** Map status prefixes back to tool names for animation selection */
 export const STATUS_TO_TOOL: Record<string, string> = {
@@ -47,6 +47,32 @@ export function calculateLevel(totalExp: number): {
   const currentLevelExp = totalExp - expConsumed
   const progress = threshold > 0 ? currentLevelExp / threshold : 0
   return { level, currentLevelExp, nextLevelExp: threshold, progress }
+}
+
+/** Find the last entry in a sorted reward table where `level >= entry.level`. */
+function findReward<T extends { level: number }>(table: readonly T[], level: number): T | null {
+  let result: T | null = null
+  for (const entry of table) {
+    if (level >= entry.level) result = entry
+    else break
+  }
+  return result
+}
+
+/** Get the title and color for a given level */
+export function getTitleForLevel(level: number): { title: string; color: string } {
+  const entry = findReward(LEVEL_TITLES, level) ?? LEVEL_TITLES[0]
+  return { title: entry.title, color: entry.color }
+}
+
+/** Get the highest unlocked accessory id for a given level, or null */
+export function getAccessoryForLevel(level: number): string | null {
+  return findReward(LEVEL_ACCESSORIES, level)?.id ?? null
+}
+
+/** Get the highest unlocked aura id for a given level, or null */
+export function getAuraForLevel(level: number): string | null {
+  return findReward(LEVEL_AURAS, level)?.id ?? null
 }
 
 /** Compute a default integer zoom level (device pixels per sprite pixel) */

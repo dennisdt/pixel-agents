@@ -1,7 +1,7 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import type { OfficeState } from '../office/engine/officeState.js'
 import type { OfficeLayout, ToolActivity } from '../office/types.js'
-import { extractToolName } from '../office/toolUtils.js'
+import { extractToolName, calculateLevel } from '../office/toolUtils.js'
 import { migrateLayoutColors } from '../office/layout/layoutSerializer.js'
 import { buildDynamicCatalog } from '../office/layout/furnitureCatalog.js'
 import { setFloorSprites } from '../office/floorTiles.js'
@@ -84,8 +84,39 @@ export function useExtensionMessages(
   const [directoryExp, setDirectoryExp] = useState<Record<string, number>>({})
   const [agentCwds, setAgentCwds] = useState<Record<number, string>>({})
 
+  // Refs that mirror state for synchronous reads inside the message handler
+  const directoryExpRef = useRef<Record<string, number>>({})
+  const agentCwdsRef = useRef<Record<number, string>>({})
+
   // Track whether initial layout has been loaded (ref to avoid re-render)
   const layoutReadyRef = useRef(false)
+
+  /** Update directoryExp state and ref together */
+  const updateDirectoryExp = useCallback((updater: Record<string, number> | ((prev: Record<string, number>) => Record<string, number>)) => {
+    setDirectoryExp((prev) => {
+      const next = typeof updater === 'function' ? updater(prev) : updater
+      directoryExpRef.current = next
+      return next
+    })
+  }, [])
+
+  /** Update agentCwds state and ref together */
+  const updateAgentCwds = useCallback((updater: Record<number, string> | ((prev: Record<number, string>) => Record<number, string>)) => {
+    setAgentCwds((prev) => {
+      const next = typeof updater === 'function' ? updater(prev) : updater
+      agentCwdsRef.current = next
+      return next
+    })
+  }, [])
+
+  /** Sync a character's level from its directory EXP */
+  function syncCharacterLevel(os: OfficeState, agentId: number, exp: number): void {
+    if (exp <= 0) return
+    const ch = os.characters.get(agentId)
+    if (ch && !ch.isSubagent) {
+      ch.level = calculateLevel(exp).level
+    }
+  }
 
   useEffect(() => {
     // Buffer agents from existingAgents until layout is loaded
@@ -129,7 +160,7 @@ export function useExtensionMessages(
           setAgentFolderNames((prev) => ({ ...prev, [id]: folderName }))
         }
         if (cwd) {
-          setAgentCwds((prev) => ({ ...prev, [id]: cwd }))
+          updateAgentCwds((prev) => ({ ...prev, [id]: cwd }))
         }
         if (isExternal) {
           setExternalAgentIds((prev) => { const next = new Set(prev); next.add(id); return next })
@@ -137,6 +168,10 @@ export function useExtensionMessages(
           setSelectedAgent(id)
         }
         os.addAgent(id, undefined, undefined, undefined, undefined, folderName)
+        // Sync level from directory EXP
+        if (cwd) {
+          syncCharacterLevel(os, id, directoryExpRef.current[cwd] ?? 0)
+        }
         saveAgentSeats(os)
       } else if (msg.type === 'agentClosed') {
         const id = msg.id as number
@@ -149,7 +184,7 @@ export function useExtensionMessages(
           delete next[id]
           return next
         })
-        setAgentCwds((prev) => {
+        updateAgentCwds((prev) => {
           if (!(id in prev)) return prev
           const next = { ...prev }
           delete next[id]
@@ -214,7 +249,7 @@ export function useExtensionMessages(
           setAgentFolderNames((prev) => ({ ...prev, ...allFolderNames }))
         }
         if (Object.keys(cwdUpdates).length > 0) {
-          setAgentCwds((prev) => ({ ...prev, ...cwdUpdates }))
+          updateAgentCwds((prev) => ({ ...prev, ...cwdUpdates }))
         }
       } else if (msg.type === 'agentToolStart') {
         const id = msg.id as number
@@ -395,9 +430,22 @@ export function useExtensionMessages(
         const soundOn = msg.soundEnabled as boolean
         setSoundEnabled(soundOn)
       } else if (msg.type === 'directoryExpAll') {
-        setDirectoryExp(msg.stats as Record<string, number>)
+        const stats = msg.stats as Record<string, number>
+        updateDirectoryExp(stats)
+        // Sync levels to characters
+        for (const [idStr, cwd] of Object.entries(agentCwdsRef.current)) {
+          syncCharacterLevel(os, Number(idStr), stats[cwd] ?? 0)
+        }
       } else if (msg.type === 'directoryExp') {
-        setDirectoryExp((prev) => ({ ...prev, [msg.directory as string]: msg.totalExp as number }))
+        const dir = msg.directory as string
+        const totalExp = msg.totalExp as number
+        updateDirectoryExp((prev) => ({ ...prev, [dir]: totalExp }))
+        // Sync level for any agent in this directory
+        for (const [idStr, cwd] of Object.entries(agentCwdsRef.current)) {
+          if (cwd === dir) {
+            syncCharacterLevel(os, Number(idStr), totalExp)
+          }
+        }
       } else if (msg.type === 'furnitureAssetsLoaded') {
         try {
           const catalog = msg.catalog as FurnitureAsset[]
