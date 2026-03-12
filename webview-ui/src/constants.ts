@@ -97,8 +97,14 @@ export const NOTIFICATION_NOTE_DURATION_SEC = 0.18
 export const NOTIFICATION_VOLUME = 0.14
 
 // ── Leveling / EXP ──────────────────────────────────────────
-export const EXP_BASE = 1500
-export const EXP_GROWTH_FACTOR = 1.3
+export const EXP_BASE_COST = 1000
+export const EXP_TIERS = [
+  { maxLevel:  5, growth: 1.5  },
+  { maxLevel: 10, growth: 1.35 },
+  { maxLevel: 20, growth: 1.18 },
+  { maxLevel: 35, growth: 1.08 },
+  { maxLevel: 50, growth: 1.04 },
+] as const
 export const EXP_BAR_WIDTH_PX = 60
 export const EXP_BAR_HEIGHT_PX = 4
 export const EXP_BAR_BG_COLOR = 'rgba(255, 255, 255, 0.15)'

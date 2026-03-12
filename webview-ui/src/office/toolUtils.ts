@@ -1,4 +1,4 @@
-import { ZOOM_DEFAULT_DPR_FACTOR, ZOOM_MIN, EXP_BASE, EXP_GROWTH_FACTOR } from '../constants.js'
+import { ZOOM_DEFAULT_DPR_FACTOR, ZOOM_MIN, EXP_BASE_COST, EXP_TIERS } from '../constants.js'
 
 /** Map status prefixes back to tool names for animation selection */
 export const STATUS_TO_TOOL: Record<string, string> = {
@@ -21,6 +21,14 @@ export function extractToolName(status: string): string | null {
   return first || null
 }
 
+/** Return the EXP growth multiplier for the tier that contains `level`. */
+function getGrowthForLevel(level: number): number {
+  for (const tier of EXP_TIERS) {
+    if (level <= tier.maxLevel) return tier.growth
+  }
+  return EXP_TIERS[EXP_TIERS.length - 1].growth
+}
+
 export function calculateLevel(totalExp: number): {
   level: number
   currentLevelExp: number
@@ -29,14 +37,15 @@ export function calculateLevel(totalExp: number): {
 } {
   let level = 1
   let expConsumed = 0
-  let threshold = EXP_BASE
+  let threshold = EXP_BASE_COST
   while (expConsumed + threshold <= totalExp) {
     expConsumed += threshold
     level++
-    threshold = Math.floor(EXP_BASE * Math.pow(EXP_GROWTH_FACTOR, level - 1))
+    threshold = Math.floor(threshold * getGrowthForLevel(level))
   }
   const currentLevelExp = totalExp - expConsumed
-  return { level, currentLevelExp, nextLevelExp: threshold, progress: threshold > 0 ? currentLevelExp / threshold : 0 }
+  const progress = threshold > 0 ? currentLevelExp / threshold : 0
+  return { level, currentLevelExp, nextLevelExp: threshold, progress }
 }
 
 /** Compute a default integer zoom level (device pixels per sprite pixel) */
