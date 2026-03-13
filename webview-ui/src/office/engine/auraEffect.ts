@@ -1,26 +1,17 @@
 import {
-  AURA_SPARKLE_COUNT,
   AURA_SPARKLE_CYCLE_SEC,
-  AURA_GLOW_ALPHA,
-  AURA_GLOW_PIXEL_COUNT,
-  AURA_FLAME_SPEED,
-  AURA_FLAME_COUNT,
   AURA_RAINBOW_CYCLE_SEC,
   AURA_LIGHTNING_BURST_SEC,
   AURA_LIGHTNING_FLASH_SEC,
   AURA_COSMIC_ORBIT_SPEED,
-  AURA_COSMIC_STAR_COUNT,
 } from '../../constants.js'
 
+function lerp(min: number, max: number, t: number): number {
+  return min + (max - min) * t
+}
+
 /** Render an aura effect behind a character.
- *  @param ctx Canvas context
- *  @param auraId The aura type id
- *  @param x Character draw X (top-left of sprite in device pixels)
- *  @param y Character draw Y (top-left of sprite in device pixels)
- *  @param w Character sprite width in device pixels
- *  @param h Character sprite height in device pixels
- *  @param zoom Current zoom level
- *  @param auraTimer Monotonically increasing time (seconds)
+ *  @param intensity 0.0 (just unlocked) to 1.0 (max tier progression)
  */
 export function renderAura(
   ctx: CanvasRenderingContext2D,
@@ -31,14 +22,15 @@ export function renderAura(
   h: number,
   zoom: number,
   auraTimer: number,
+  intensity: number,
 ): void {
   switch (auraId) {
-    case 'sparkle': renderSparkle(ctx, x, y, w, h, zoom, auraTimer); break
-    case 'glow': renderGlow(ctx, x, y, w, h, zoom, auraTimer); break
-    case 'flame': renderFlame(ctx, x, y, w, h, zoom, auraTimer); break
-    case 'rainbow': renderRainbow(ctx, x, y, w, h, zoom, auraTimer); break
-    case 'lightning': renderLightning(ctx, x, y, w, h, zoom, auraTimer); break
-    case 'cosmic': renderCosmic(ctx, x, y, w, h, zoom, auraTimer); break
+    case 'sparkle': renderSparkle(ctx, x, y, w, h, zoom, auraTimer, intensity); break
+    case 'glow': renderGlow(ctx, x, y, w, h, zoom, auraTimer, intensity); break
+    case 'flame': renderFlame(ctx, x, y, w, h, zoom, auraTimer, intensity); break
+    case 'rainbow': renderRainbow(ctx, x, y, w, h, zoom, auraTimer, intensity); break
+    case 'lightning': renderLightning(ctx, x, y, w, h, zoom, auraTimer, intensity); break
+    case 'cosmic': renderCosmic(ctx, x, y, w, h, zoom, auraTimer, intensity); break
   }
 }
 
@@ -49,56 +41,63 @@ function seeded(seed: number): number {
 }
 
 // ── Sparkle ─────────────────────────────────────────────────
+// Scales: 3→8 particles, alpha 0.4→0.9, radius +1→+3px
 function renderSparkle(
   ctx: CanvasRenderingContext2D,
   x: number, y: number, w: number, h: number,
-  zoom: number, t: number,
+  zoom: number, t: number, intensity: number,
 ): void {
   const pxSize = zoom
   const cx = x + w / 2
   const cy = y + h / 2
-  const radiusX = w / 2 + pxSize * 2
-  const radiusY = h / 2 + pxSize * 2
+  const spread = lerp(1, 3, intensity)
+  const radiusX = w / 2 + pxSize * spread
+  const radiusY = h / 2 + pxSize * spread
+  const count = Math.round(lerp(3, 8, intensity))
+  const alphaScale = lerp(0.4, 0.9, intensity)
 
-  for (let i = 0; i < AURA_SPARKLE_COUNT; i++) {
+  ctx.save()
+  for (let i = 0; i < count; i++) {
     const seed = i * 73.37
     const angle = seeded(seed) * Math.PI * 2
     const dist = 0.6 + seeded(seed + 1) * 0.4
     const phase = seeded(seed + 2) * Math.PI * 2
     const brightness = Math.sin(t / AURA_SPARKLE_CYCLE_SEC * Math.PI * 2 + phase)
 
-    if (brightness < 0) continue // hidden half the time
+    if (brightness < 0) continue
 
-    const alpha = brightness * 0.8
     const px = cx + Math.cos(angle) * radiusX * dist
     const py = cy + Math.sin(angle) * radiusY * dist
 
-    ctx.save()
-    ctx.globalAlpha = alpha
+    ctx.globalAlpha = brightness * alphaScale
     ctx.fillStyle = brightness > 0.5 ? '#ffffff' : '#ffffaa'
     ctx.fillRect(Math.round(px), Math.round(py), pxSize, pxSize)
-    ctx.restore()
   }
+  ctx.restore()
 }
 
 // ── Glow ────────────────────────────────────────────────────
+// Scales: 4→10 pixels, alpha 0.15→0.45, radius +0.5→+2px
 function renderGlow(
   ctx: CanvasRenderingContext2D,
   x: number, y: number, w: number, h: number,
-  zoom: number, t: number,
+  zoom: number, t: number, intensity: number,
 ): void {
   const pxSize = zoom
   const cx = x + w / 2
   const cy = y + h / 2
-  const radiusX = w / 2 + pxSize
-  const radiusY = h / 2 + pxSize
+  const spread = lerp(0.5, 2, intensity)
+  const radiusX = w / 2 + pxSize * spread
+  const radiusY = h / 2 + pxSize * spread
+  const count = Math.round(lerp(4, 10, intensity))
+  const baseAlpha = lerp(0.15, 0.45, intensity)
 
   ctx.save()
-  ctx.globalAlpha = AURA_GLOW_ALPHA + Math.sin(t * 2) * 0.1
+  ctx.globalAlpha = baseAlpha + Math.sin(t * 2) * 0.1
   ctx.fillStyle = '#88ddff'
 
-  for (let i = 0; i < AURA_GLOW_PIXEL_COUNT; i++) {
-    const angle = (i / AURA_GLOW_PIXEL_COUNT) * Math.PI * 2 + t * 0.3
+  for (let i = 0; i < count; i++) {
+    const angle = (i / count) * Math.PI * 2 + t * 0.3
     const px = cx + Math.cos(angle) * radiusX
     const py = cy + Math.sin(angle) * radiusY
     ctx.fillRect(Math.round(px), Math.round(py), pxSize, pxSize)
@@ -108,23 +107,27 @@ function renderGlow(
 }
 
 // ── Flame ───────────────────────────────────────────────────
+// Scales: 2→6 particles, height 4→8px, alpha 0.5→1.0 multiplier
 function renderFlame(
   ctx: CanvasRenderingContext2D,
   x: number, y: number, w: number, h: number,
-  zoom: number, t: number,
+  zoom: number, t: number, intensity: number,
 ): void {
   const pxSize = zoom
-  const baseY = y + h // bottom of character
-  const flameH = pxSize * 6
+  const baseY = y + h
+  const flameH = pxSize * lerp(4, 8, intensity)
+  const count = Math.round(lerp(2, 6, intensity))
+  const alphaScale = lerp(0.5, 1.0, intensity)
+  const speed = lerp(18, 30, intensity)
 
-  for (let i = 0; i < AURA_FLAME_COUNT; i++) {
+  ctx.save()
+  for (let i = 0; i < count; i++) {
     const seed = i * 31.13
     const offsetX = x + seeded(seed) * w
-    const rise = ((t * AURA_FLAME_SPEED + seeded(seed + 1) * flameH) % flameH)
+    const rise = ((t * speed + seeded(seed + 1) * flameH) % flameH)
     const py = baseY - rise
-    const progress = rise / flameH // 0 at bottom, 1 at top
+    const progress = rise / flameH
 
-    // Color: orange → red → dark as it rises
     let color: string
     let alpha: number
     if (progress < 0.33) {
@@ -138,27 +141,31 @@ function renderFlame(
       alpha = 0.3
     }
 
-    ctx.save()
-    ctx.globalAlpha = alpha
+    ctx.globalAlpha = alpha * alphaScale
     ctx.fillStyle = color
     ctx.fillRect(Math.round(offsetX), Math.round(py), pxSize, pxSize)
-    ctx.restore()
   }
+  ctx.restore()
 }
 
 // ── Rainbow ─────────────────────────────────────────────────
+// Scales: 3→8 particles, alpha 0.4→0.9, radius +1→+3px
 function renderRainbow(
   ctx: CanvasRenderingContext2D,
   x: number, y: number, w: number, h: number,
-  zoom: number, t: number,
+  zoom: number, t: number, intensity: number,
 ): void {
   const pxSize = zoom
   const cx = x + w / 2
   const cy = y + h / 2
-  const radiusX = w / 2 + pxSize * 2
-  const radiusY = h / 2 + pxSize * 2
+  const spread = lerp(1, 3, intensity)
+  const radiusX = w / 2 + pxSize * spread
+  const radiusY = h / 2 + pxSize * spread
+  const count = Math.round(lerp(3, 8, intensity))
+  const alphaScale = lerp(0.4, 0.9, intensity)
 
-  for (let i = 0; i < AURA_SPARKLE_COUNT; i++) {
+  ctx.save()
+  for (let i = 0; i < count; i++) {
     const seed = i * 73.37
     const angle = seeded(seed) * Math.PI * 2
     const dist = 0.6 + seeded(seed + 1) * 0.4
@@ -171,40 +178,41 @@ function renderRainbow(
     const px = cx + Math.cos(angle) * radiusX * dist
     const py = cy + Math.sin(angle) * radiusY * dist
 
-    ctx.save()
-    ctx.globalAlpha = brightness * 0.8
+    ctx.globalAlpha = brightness * alphaScale
     ctx.fillStyle = `hsl(${hue}, 100%, 65%)`
     ctx.fillRect(Math.round(px), Math.round(py), pxSize, pxSize)
-    ctx.restore()
   }
+  ctx.restore()
 }
 
 // ── Lightning ───────────────────────────────────────────────
+// Scales: 2→5 flash pixels, burst gap 1.8→1.0s, alpha 0.6→1.0
 function renderLightning(
   ctx: CanvasRenderingContext2D,
   x: number, y: number, w: number, h: number,
-  zoom: number, t: number,
+  zoom: number, t: number, intensity: number,
 ): void {
   const pxSize = zoom
   const cx = x + w / 2
   const cy = y + h / 2
-  const radiusX = w / 2 + pxSize * 2
-  const radiusY = h / 2 + pxSize * 2
+  const spread = lerp(1.5, 3, intensity)
+  const radiusX = w / 2 + pxSize * spread
+  const radiusY = h / 2 + pxSize * spread
+  const burstInterval = lerp(AURA_LIGHTNING_BURST_SEC, 0.8, intensity)
+  const flashCount = Math.round(lerp(2, 5, intensity))
+  const alphaScale = lerp(0.6, 1.0, intensity)
 
-  // Flash in bursts: on for FLASH_SEC, off for rest of BURST_SEC cycle
-  const burstPhase = t % AURA_LIGHTNING_BURST_SEC
-  if (burstPhase > AURA_LIGHTNING_FLASH_SEC * 3) return // pause between bursts
+  const burstPhase = t % burstInterval
+  if (burstPhase > AURA_LIGHTNING_FLASH_SEC * 3) return
 
-  // 1-3 quick flashes
   const flashIdx = Math.floor(burstPhase / AURA_LIGHTNING_FLASH_SEC)
-  const flashSeed = Math.floor(t / AURA_LIGHTNING_BURST_SEC) * 100 + flashIdx
+  const flashSeed = Math.floor(t / burstInterval) * 100 + flashIdx
 
   ctx.save()
-  ctx.globalAlpha = 0.9
+  ctx.globalAlpha = alphaScale
   ctx.fillStyle = '#ffffff'
 
-  // Draw 2-3 bright pixels in an arc
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < flashCount; i++) {
     const s = flashSeed + i * 17.3
     const angle = seeded(s) * Math.PI * 2
     const dist = 0.5 + seeded(s + 1) * 0.5
@@ -213,54 +221,57 @@ function renderLightning(
     ctx.fillRect(Math.round(px), Math.round(py), pxSize, pxSize)
   }
 
-  // Connecting pixel between first two for "arc" feel
-  const s0 = flashSeed + 0 * 17.3
-  const s1 = flashSeed + 1 * 17.3
-  const a0 = seeded(s0) * Math.PI * 2
-  const a1 = seeded(s1) * Math.PI * 2
-  const midAngle = (a0 + a1) / 2
-  const midDist = 0.4 + seeded(flashSeed + 50) * 0.3
-  ctx.globalAlpha = 0.6
-  ctx.fillStyle = '#ccddff'
-  ctx.fillRect(
-    Math.round(cx + Math.cos(midAngle) * radiusX * midDist),
-    Math.round(cy + Math.sin(midAngle) * radiusY * midDist),
-    pxSize, pxSize,
-  )
+  // Connecting pixels for arc feel
+  if (flashCount >= 2) {
+    const s0 = flashSeed + 0 * 17.3
+    const s1 = flashSeed + 1 * 17.3
+    const a0 = seeded(s0) * Math.PI * 2
+    const a1 = seeded(s1) * Math.PI * 2
+    const midAngle = (a0 + a1) / 2
+    const midDist = 0.4 + seeded(flashSeed + 50) * 0.3
+    ctx.globalAlpha = alphaScale * 0.7
+    ctx.fillStyle = '#ccddff'
+    ctx.fillRect(
+      Math.round(cx + Math.cos(midAngle) * radiusX * midDist),
+      Math.round(cy + Math.sin(midAngle) * radiusY * midDist),
+      pxSize, pxSize,
+    )
+  }
 
   ctx.restore()
 }
 
 // ── Cosmic ──────────────────────────────────────────────────
+// Scales: 3→8 stars, orbit radius wider, twinkle brighter
 function renderCosmic(
   ctx: CanvasRenderingContext2D,
   x: number, y: number, w: number, h: number,
-  zoom: number, t: number,
+  zoom: number, t: number, intensity: number,
 ): void {
   const pxSize = zoom
   const cx = x + w / 2
   const cy = y + h / 2
+  const count = Math.round(lerp(3, 8, intensity))
+  const orbitScale = lerp(0.7, 1.3, intensity)
+  const alphaScale = lerp(0.5, 0.9, intensity)
 
-  for (let i = 0; i < AURA_COSMIC_STAR_COUNT; i++) {
+  ctx.save()
+  for (let i = 0; i < count; i++) {
     const seed = i * 53.71
-    const orbitRadius = (w / 2 + pxSize * 2) * (0.7 + seeded(seed) * 0.6)
+    const orbitRadius = (w / 2 + pxSize * 2) * (0.7 + seeded(seed) * 0.6) * orbitScale
     const speed = AURA_COSMIC_ORBIT_SPEED * (0.6 + seeded(seed + 1) * 0.8)
     const startAngle = seeded(seed + 2) * Math.PI * 2
     const angle = startAngle + t * speed
 
-    // Elliptical orbit (wider horizontally)
     const px = cx + Math.cos(angle) * orbitRadius
     const py = cy + Math.sin(angle) * orbitRadius * 0.6
 
-    // Color drift
     const hue = ((t * 30) + i * 72) % 360
-    // Twinkle pulse
     const twinkle = 0.5 + Math.sin(t * 4 + i * 1.5) * 0.5
 
-    ctx.save()
-    ctx.globalAlpha = twinkle * 0.8
+    ctx.globalAlpha = twinkle * alphaScale
     ctx.fillStyle = `hsl(${hue}, 80%, 70%)`
     ctx.fillRect(Math.round(px), Math.round(py), pxSize, pxSize)
-    ctx.restore()
   }
+  ctx.restore()
 }

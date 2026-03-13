@@ -5,7 +5,7 @@ import { getCharacterSprites, BUBBLE_PERMISSION_SPRITE, BUBBLE_WAITING_SPRITE } 
 import { getCharacterSprite } from './characters.js'
 import { renderMatrixEffect } from './matrixEffect.js'
 import { renderAura } from './auraEffect.js'
-import { getAuraForLevel } from '../toolUtils.js'
+import { getAuraForLevel, getAuraIntensity } from '../toolUtils.js'
 import { getColorizedFloorSprite, hasFloorSprites, WALL_COLOR } from '../floorTiles.js'
 import { hasWallSprites, getWallInstances, wallColorToHex } from '../wallTiles.js'
 import {
@@ -181,10 +181,11 @@ export function renderScene(
       if (auraId) {
         const spriteW = cached.width
         const spriteH = cached.height
+        const intensity = getAuraIntensity(ch.level)
         drawables.push({
           zY: charZY - OUTLINE_Z_SORT_OFFSET * 0.5,
           draw: (c) => {
-            renderAura(c, auraId, drawX, drawY, spriteW, spriteH, zoom, ch.auraTimer)
+            renderAura(c, auraId, drawX, drawY, spriteW, spriteH, zoom, ch.auraTimer, intensity)
           },
         })
       }

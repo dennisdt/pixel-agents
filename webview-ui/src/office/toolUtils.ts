@@ -70,6 +70,22 @@ export function getAuraForLevel(level: number): string | null {
   return findReward(LEVEL_AURAS, level)?.id ?? null
 }
 
+/** Get aura intensity (0.0–1.0) based on progress through current aura tier.
+ *  0.0 = just unlocked, 1.0 = at or past the next tier threshold. */
+export function getAuraIntensity(level: number): number {
+  let currentIdx = -1
+  for (let i = 0; i < LEVEL_AURAS.length; i++) {
+    if (level >= LEVEL_AURAS[i].level) currentIdx = i
+    else break
+  }
+  if (currentIdx < 0) return 0
+  const start = LEVEL_AURAS[currentIdx].level
+  const end = currentIdx + 1 < LEVEL_AURAS.length
+    ? LEVEL_AURAS[currentIdx + 1].level
+    : start + 15 // cosmic tier: scale over 15 levels past Lv.50
+  return Math.min(1, (level - start) / (end - start))
+}
+
 /** Compute a default integer zoom level (device pixels per sprite pixel) */
 export function defaultZoom(): number {
   const dpr = window.devicePixelRatio || 1

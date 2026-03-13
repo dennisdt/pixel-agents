@@ -135,18 +135,12 @@ export const LEVEL_AURAS = [
   { level: 50, id: 'cosmic' },
 ] as const
 
-// Aura animation constants
-export const AURA_SPARKLE_COUNT = 5
+// Aura animation constants (per-effect counts/alphas are lerped by intensity in auraEffect.ts)
 export const AURA_SPARKLE_CYCLE_SEC = 0.8
-export const AURA_GLOW_ALPHA = 0.3
-export const AURA_GLOW_PIXEL_COUNT = 6
-export const AURA_FLAME_SPEED = 24
-export const AURA_FLAME_COUNT = 3
 export const AURA_RAINBOW_CYCLE_SEC = 2.0
 export const AURA_LIGHTNING_BURST_SEC = 1.5
 export const AURA_LIGHTNING_FLASH_SEC = 0.1
 export const AURA_COSMIC_ORBIT_SPEED = 1.2
-export const AURA_COSMIC_STAR_COUNT = 5
 
 // ── Game Logic ───────────────────────────────────────────────
 export const MAX_DELTA_TIME_SEC = 0.1
