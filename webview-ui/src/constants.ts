@@ -126,16 +126,6 @@ export const LEVEL_TITLES = [
   { level: 50, title: 'Transcendent', color: '#00ffcc' },
 ] as const
 
-export const LEVEL_ACCESSORIES = [
-  { level: 5,  id: 'glasses' },
-  { level: 10, id: 'headband' },
-  { level: 15, id: 'hardhat' },
-  { level: 25, id: 'crown' },
-  { level: 35, id: 'halo' },
-  { level: 40, id: 'horns' },
-  { level: 50, id: 'wings' },
-] as const
-
 export const LEVEL_AURAS = [
   { level: 8,  id: 'sparkle' },
   { level: 15, id: 'glow' },

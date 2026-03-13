@@ -1,4 +1,4 @@
-import { ZOOM_DEFAULT_DPR_FACTOR, ZOOM_MIN, EXP_BASE_COST, EXP_TIERS, LEVEL_TITLES, LEVEL_ACCESSORIES, LEVEL_AURAS } from '../constants.js'
+import { ZOOM_DEFAULT_DPR_FACTOR, ZOOM_MIN, EXP_BASE_COST, EXP_TIERS, LEVEL_TITLES, LEVEL_AURAS } from '../constants.js'
 
 /** Map status prefixes back to tool names for animation selection */
 export const STATUS_TO_TOOL: Record<string, string> = {
@@ -63,11 +63,6 @@ function findReward<T extends { level: number }>(table: readonly T[], level: num
 export function getTitleForLevel(level: number): { title: string; color: string } {
   const entry = findReward(LEVEL_TITLES, level) ?? LEVEL_TITLES[0]
   return { title: entry.title, color: entry.color }
-}
-
-/** Get the highest unlocked accessory id for a given level, or null */
-export function getAccessoryForLevel(level: number): string | null {
-  return findReward(LEVEL_ACCESSORIES, level)?.id ?? null
 }
 
 /** Get the highest unlocked aura id for a given level, or null */

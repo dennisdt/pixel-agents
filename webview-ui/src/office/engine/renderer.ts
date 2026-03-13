@@ -5,8 +5,7 @@ import { getCharacterSprites, BUBBLE_PERMISSION_SPRITE, BUBBLE_WAITING_SPRITE } 
 import { getCharacterSprite } from './characters.js'
 import { renderMatrixEffect } from './matrixEffect.js'
 import { renderAura } from './auraEffect.js'
-import { getAccessoryData } from '../sprites/accessories.js'
-import { getAccessoryForLevel, getAuraForLevel } from '../toolUtils.js'
+import { getAuraForLevel } from '../toolUtils.js'
 import { getColorizedFloorSprite, hasFloorSprites, WALL_COLOR } from '../floorTiles.js'
 import { hasWallSprites, getWallInstances, wallColorToHex } from '../wallTiles.js'
 import {
@@ -176,7 +175,7 @@ export function renderScene(
       },
     })
 
-    // Aura effect (behind character, lower z) + accessory (on top, higher z)
+    // Aura effect (behind character, lower z)
     if (ch.level > 1 && !ch.isSubagent) {
       const auraId = getAuraForLevel(ch.level)
       if (auraId) {
@@ -188,22 +187,6 @@ export function renderScene(
             renderAura(c, auraId, drawX, drawY, spriteW, spriteH, zoom, ch.auraTimer)
           },
         })
-      }
-
-      const accId = getAccessoryForLevel(ch.level)
-      if (accId) {
-        const accData = getAccessoryData(accId, ch.dir)
-        if (accData) {
-          const accCached = getCachedSprite(accData.sprite, zoom)
-          const accX = drawX + accData.dx * zoom
-          const accY = drawY + accData.dy * zoom
-          drawables.push({
-            zY: charZY + OUTLINE_Z_SORT_OFFSET * 0.5,
-            draw: (c) => {
-              c.drawImage(accCached, accX, accY)
-            },
-          })
-        }
       }
     }
   }
