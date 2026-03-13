@@ -25,10 +25,10 @@ export function renderAura(
   intensity: number,
 ): void {
   switch (auraId) {
-    case 'sparkle': renderSparkle(ctx, x, y, w, h, zoom, auraTimer, intensity); break
+    case 'sparkle': renderSparkleOrRainbow(ctx, x, y, w, h, zoom, auraTimer, intensity, false); break
     case 'glow': renderGlow(ctx, x, y, w, h, zoom, auraTimer, intensity); break
     case 'flame': renderFlame(ctx, x, y, w, h, zoom, auraTimer, intensity); break
-    case 'rainbow': renderRainbow(ctx, x, y, w, h, zoom, auraTimer, intensity); break
+    case 'rainbow': renderSparkleOrRainbow(ctx, x, y, w, h, zoom, auraTimer, intensity, true); break
     case 'lightning': renderLightning(ctx, x, y, w, h, zoom, auraTimer, intensity); break
     case 'cosmic': renderCosmic(ctx, x, y, w, h, zoom, auraTimer, intensity); break
   }
@@ -40,21 +40,36 @@ function seeded(seed: number): number {
   return x - Math.floor(x)
 }
 
-// ── Sparkle ─────────────────────────────────────────────────
-// Scales: 3→8 particles, alpha 0.4→0.9, radius +1→+3px
-function renderSparkle(
+/** Compute center point and elliptical radii for radial aura effects */
+function auraGeometry(
+  x: number, y: number, w: number, h: number,
+  pxSize: number, spreadMin: number, spreadMax: number, intensity: number,
+): { cx: number; cy: number; radiusX: number; radiusY: number } {
+  const spread = lerp(spreadMin, spreadMax, intensity)
+  return {
+    cx: x + w / 2,
+    cy: y + h / 2,
+    radiusX: w / 2 + pxSize * spread,
+    radiusY: h / 2 + pxSize * spread,
+  }
+}
+
+// ── Sparkle / Rainbow ───────────────────────────────────────
+// Sparkle (Lv.8):  3→8 particles, alpha 0.4→0.9, radius +1→+3px
+// Rainbow (Lv.35): 5→10 particles, alpha 0.5→0.95, radius +1.5→+3.5px
+// Sparkle uses white/yellow; rainbow cycles hue
+function renderSparkleOrRainbow(
   ctx: CanvasRenderingContext2D,
   x: number, y: number, w: number, h: number,
   zoom: number, t: number, intensity: number,
+  rainbow: boolean,
 ): void {
   const pxSize = zoom
-  const cx = x + w / 2
-  const cy = y + h / 2
-  const spread = lerp(1, 3, intensity)
-  const radiusX = w / 2 + pxSize * spread
-  const radiusY = h / 2 + pxSize * spread
-  const count = Math.round(lerp(3, 8, intensity))
-  const alphaScale = lerp(0.4, 0.9, intensity)
+  const { cx, cy, radiusX, radiusY } = rainbow
+    ? auraGeometry(x, y, w, h, pxSize, 1.5, 3.5, intensity)
+    : auraGeometry(x, y, w, h, pxSize, 1, 3, intensity)
+  const count = Math.round(rainbow ? lerp(5, 10, intensity) : lerp(3, 8, intensity))
+  const alphaScale = rainbow ? lerp(0.5, 0.95, intensity) : lerp(0.4, 0.9, intensity)
 
   ctx.save()
   for (let i = 0; i < count; i++) {
@@ -70,25 +85,26 @@ function renderSparkle(
     const py = cy + Math.sin(angle) * radiusY * dist
 
     ctx.globalAlpha = brightness * alphaScale
-    ctx.fillStyle = brightness > 0.5 ? '#ffffff' : '#ffffaa'
+    if (rainbow) {
+      const hue = ((t / AURA_RAINBOW_CYCLE_SEC * 360) + i * 72) % 360
+      ctx.fillStyle = `hsl(${hue}, 100%, 65%)`
+    } else {
+      ctx.fillStyle = brightness > 0.5 ? '#ffffff' : '#ffffaa'
+    }
     ctx.fillRect(Math.round(px), Math.round(py), pxSize, pxSize)
   }
   ctx.restore()
 }
 
 // ── Glow ────────────────────────────────────────────────────
-// Scales: 4→10 pixels, alpha 0.15→0.45, radius +0.5→+2px
+// Scales: 4->10 pixels, alpha 0.15->0.45, radius +0.5->+2px
 function renderGlow(
   ctx: CanvasRenderingContext2D,
   x: number, y: number, w: number, h: number,
   zoom: number, t: number, intensity: number,
 ): void {
   const pxSize = zoom
-  const cx = x + w / 2
-  const cy = y + h / 2
-  const spread = lerp(0.5, 2, intensity)
-  const radiusX = w / 2 + pxSize * spread
-  const radiusY = h / 2 + pxSize * spread
+  const { cx, cy, radiusX, radiusY } = auraGeometry(x, y, w, h, pxSize, 0.5, 2, intensity)
   const count = Math.round(lerp(4, 10, intensity))
   const baseAlpha = lerp(0.15, 0.45, intensity)
 
@@ -107,7 +123,7 @@ function renderGlow(
 }
 
 // ── Flame ───────────────────────────────────────────────────
-// Scales: 2→6 particles, height 4→8px, alpha 0.5→1.0 multiplier
+// Scales: 2->6 particles, height 4->8px, alpha 0.5->1.0 multiplier
 function renderFlame(
   ctx: CanvasRenderingContext2D,
   x: number, y: number, w: number, h: number,
@@ -148,56 +164,15 @@ function renderFlame(
   ctx.restore()
 }
 
-// ── Rainbow ─────────────────────────────────────────────────
-// Scales: 3→8 particles, alpha 0.4→0.9, radius +1→+3px
-function renderRainbow(
-  ctx: CanvasRenderingContext2D,
-  x: number, y: number, w: number, h: number,
-  zoom: number, t: number, intensity: number,
-): void {
-  const pxSize = zoom
-  const cx = x + w / 2
-  const cy = y + h / 2
-  const spread = lerp(1, 3, intensity)
-  const radiusX = w / 2 + pxSize * spread
-  const radiusY = h / 2 + pxSize * spread
-  const count = Math.round(lerp(3, 8, intensity))
-  const alphaScale = lerp(0.4, 0.9, intensity)
-
-  ctx.save()
-  for (let i = 0; i < count; i++) {
-    const seed = i * 73.37
-    const angle = seeded(seed) * Math.PI * 2
-    const dist = 0.6 + seeded(seed + 1) * 0.4
-    const phase = seeded(seed + 2) * Math.PI * 2
-    const brightness = Math.sin(t / AURA_SPARKLE_CYCLE_SEC * Math.PI * 2 + phase)
-
-    if (brightness < 0) continue
-
-    const hue = ((t / AURA_RAINBOW_CYCLE_SEC * 360) + i * 72) % 360
-    const px = cx + Math.cos(angle) * radiusX * dist
-    const py = cy + Math.sin(angle) * radiusY * dist
-
-    ctx.globalAlpha = brightness * alphaScale
-    ctx.fillStyle = `hsl(${hue}, 100%, 65%)`
-    ctx.fillRect(Math.round(px), Math.round(py), pxSize, pxSize)
-  }
-  ctx.restore()
-}
-
 // ── Lightning ───────────────────────────────────────────────
-// Scales: 2→5 flash pixels, burst gap 1.8→1.0s, alpha 0.6→1.0
+// Scales: 2->5 flash pixels, burst gap 1.5->0.8s, alpha 0.6->1.0
 function renderLightning(
   ctx: CanvasRenderingContext2D,
   x: number, y: number, w: number, h: number,
   zoom: number, t: number, intensity: number,
 ): void {
   const pxSize = zoom
-  const cx = x + w / 2
-  const cy = y + h / 2
-  const spread = lerp(1.5, 3, intensity)
-  const radiusX = w / 2 + pxSize * spread
-  const radiusY = h / 2 + pxSize * spread
+  const { cx, cy, radiusX, radiusY } = auraGeometry(x, y, w, h, pxSize, 1.5, 3, intensity)
   const burstInterval = lerp(AURA_LIGHTNING_BURST_SEC, 0.8, intensity)
   const flashCount = Math.round(lerp(2, 5, intensity))
   const alphaScale = lerp(0.6, 1.0, intensity)
@@ -221,12 +196,10 @@ function renderLightning(
     ctx.fillRect(Math.round(px), Math.round(py), pxSize, pxSize)
   }
 
-  // Connecting pixels for arc feel
+  // Connecting pixel between first two flash points for arc feel
   if (flashCount >= 2) {
-    const s0 = flashSeed + 0 * 17.3
-    const s1 = flashSeed + 1 * 17.3
-    const a0 = seeded(s0) * Math.PI * 2
-    const a1 = seeded(s1) * Math.PI * 2
+    const a0 = seeded(flashSeed) * Math.PI * 2
+    const a1 = seeded(flashSeed + 17.3) * Math.PI * 2
     const midAngle = (a0 + a1) / 2
     const midDist = 0.4 + seeded(flashSeed + 50) * 0.3
     ctx.globalAlpha = alphaScale * 0.7
@@ -242,7 +215,7 @@ function renderLightning(
 }
 
 // ── Cosmic ──────────────────────────────────────────────────
-// Scales: 3→8 stars, orbit radius wider, twinkle brighter
+// Scales: 3->8 stars, orbit radius wider, twinkle brighter
 function renderCosmic(
   ctx: CanvasRenderingContext2D,
   x: number, y: number, w: number, h: number,

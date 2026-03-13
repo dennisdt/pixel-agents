@@ -49,39 +49,38 @@ export function calculateLevel(totalExp: number): {
   return { level, currentLevelExp, nextLevelExp: threshold, progress }
 }
 
-/** Find the last entry in a sorted reward table where `level >= entry.level`. */
-function findReward<T extends { level: number }>(table: readonly T[], level: number): T | null {
-  let result: T | null = null
-  for (const entry of table) {
-    if (level >= entry.level) result = entry
+/** Find the index of the last entry in a sorted reward table where `level >= entry.level`.
+ *  Returns -1 if no entry qualifies. */
+function findRewardIndex<T extends { level: number }>(table: readonly T[], level: number): number {
+  let idx = -1
+  for (let i = 0; i < table.length; i++) {
+    if (level >= table[i].level) idx = i
     else break
   }
-  return result
+  return idx
 }
 
 /** Get the title and color for a given level */
 export function getTitleForLevel(level: number): { title: string; color: string } {
-  const entry = findReward(LEVEL_TITLES, level) ?? LEVEL_TITLES[0]
+  const idx = findRewardIndex(LEVEL_TITLES, level)
+  const entry = idx >= 0 ? LEVEL_TITLES[idx] : LEVEL_TITLES[0]
   return { title: entry.title, color: entry.color }
 }
 
 /** Get the highest unlocked aura id for a given level, or null */
 export function getAuraForLevel(level: number): string | null {
-  return findReward(LEVEL_AURAS, level)?.id ?? null
+  const idx = findRewardIndex(LEVEL_AURAS, level)
+  return idx >= 0 ? LEVEL_AURAS[idx].id : null
 }
 
-/** Get aura intensity (0.0–1.0) based on progress through current aura tier.
+/** Get aura intensity (0.0-1.0) based on progress through current aura tier.
  *  0.0 = just unlocked, 1.0 = at or past the next tier threshold. */
 export function getAuraIntensity(level: number): number {
-  let currentIdx = -1
-  for (let i = 0; i < LEVEL_AURAS.length; i++) {
-    if (level >= LEVEL_AURAS[i].level) currentIdx = i
-    else break
-  }
-  if (currentIdx < 0) return 0
-  const start = LEVEL_AURAS[currentIdx].level
-  const end = currentIdx + 1 < LEVEL_AURAS.length
-    ? LEVEL_AURAS[currentIdx + 1].level
+  const idx = findRewardIndex(LEVEL_AURAS, level)
+  if (idx < 0) return 0
+  const start = LEVEL_AURAS[idx].level
+  const end = idx + 1 < LEVEL_AURAS.length
+    ? LEVEL_AURAS[idx + 1].level
     : start + 15 // cosmic tier: scale over 15 levels past Lv.50
   return Math.min(1, (level - start) / (end - start))
 }
