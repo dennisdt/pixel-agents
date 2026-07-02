@@ -285,6 +285,11 @@ export class HermesPoller {
       // raw cwd), and the webview levels characters by their agent.cwd -- so
       // adoption stamps this on the agent as its cwd.
       exp_bucket: HERMES_PERSONA_BUCKET_PREFIX + s.source,
+      // Poller-vouched liveness (Wave 4 FIX 8): this session was verified via
+      // DB holders / fresh rows, so the handler adopts it immediately instead
+      // of parking it pending -- an IDLE session never produces the follow-up
+      // event the pending->confirmation filter waits for.
+      confirmed: true,
     });
   }
 

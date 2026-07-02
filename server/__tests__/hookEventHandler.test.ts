@@ -868,6 +868,83 @@ describe('HookEventHandler', () => {
     );
   });
 
+  // ── Wave 4 FIX 8: poller-vouched immediate adoption ──────────
+  // Idle poller-announced sessions never produce a follow-up event, so the
+  // pending->confirmation filter (built for transient Claude Extension
+  // sessions) parked them as "pending" forever. `confirmed: true` on the raw
+  // envelope is the poller vouching for liveness -> adopt immediately.
+
+  function makeHooksOnlyHandler(): {
+    h: HookEventHandler;
+    onExternalSessionDetected: ReturnType<typeof vi.fn>;
+  } {
+    const hooksOnlyProvider = { ...claudeProvider, usesTranscriptFile: false };
+    const h = new HookEventHandler(
+      agents,
+      waitingTimers,
+      permissionTimers,
+      hooksOnlyProvider,
+      new SessionRouter(),
+    );
+    const onExternalSessionDetected = vi.fn();
+    h.setLifecycleCallbacks({ onExternalSessionDetected });
+    return { h, onExternalSessionDetected };
+  }
+
+  it('hooks-only provider: SessionStart with confirmed:true adopts immediately, no follow-up needed', () => {
+    const { h, onExternalSessionDetected } = makeHooksOnlyHandler();
+
+    h.handleEvent('claude', {
+      hook_event_name: 'SessionStart',
+      session_id: 'vouched-sess',
+      source: 'external',
+      persona_key: 'webui:',
+      confirmed: true,
+    });
+
+    // Adopted from the SessionStart alone -- no confirmation event sent.
+    expect(onExternalSessionDetected).toHaveBeenCalledWith(
+      'vouched-sess',
+      undefined,
+      '',
+      'claude',
+      'webui:',
+      undefined, // folderHint
+      undefined, // expBucket
+    );
+  });
+
+  it('hooks-only provider: SessionStart without confirmed still goes pending (existing behavior)', () => {
+    const { h, onExternalSessionDetected } = makeHooksOnlyHandler();
+
+    h.handleEvent('claude', {
+      hook_event_name: 'SessionStart',
+      session_id: 'unvouched-sess',
+      source: 'external',
+      persona_key: 'webui:',
+    });
+    expect(onExternalSessionDetected).not.toHaveBeenCalled(); // pending
+
+    h.handleEvent('claude', { hook_event_name: 'Stop', session_id: 'unvouched-sess' });
+    expect(onExternalSessionDetected).toHaveBeenCalledTimes(1); // confirmed the usual way
+  });
+
+  it('hooks-only provider: forged empty-identity SessionStart with confirmed:true is still rejected', () => {
+    // confirmed:true must not bypass the wave-3 identifying-fields guard.
+    const { h, onExternalSessionDetected } = makeHooksOnlyHandler();
+
+    h.handleEvent('claude', {
+      hook_event_name: 'SessionStart',
+      session_id: 'forged-vouched-sess',
+      source: 'startup',
+      confirmed: true,
+    });
+    h.handleEvent('claude', { hook_event_name: 'Stop', session_id: 'forged-vouched-sess' });
+
+    expect(onExternalSessionDetected).not.toHaveBeenCalled();
+    expect(agents.size).toBe(0);
+  });
+
   it('SessionStart(source=resume) uses cwd for matching when no transcript_path', () => {
     const onSessionClear = vi.fn();
     handler.setLifecycleCallbacks({ onSessionClear });

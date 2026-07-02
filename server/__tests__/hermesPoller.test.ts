@@ -293,6 +293,19 @@ describe('HermesPoller', () => {
     expect(start?.envelope.folder_hint).toBeUndefined();
   });
 
+  // Wave 4 FIX 8: idle sessions never produce a follow-up event, so the
+  // handler's pending->confirmation filter (built for transient Claude
+  // Extension sessions) would park them as "pending" forever. The poller has
+  // already verified liveness (DB holders / fresh rows), so it vouches for
+  // the session inline and the handler adopts immediately.
+  it('marks SessionStart envelopes confirmed (poller-vouched liveness)', () => {
+    insertSession('s1', 'cli', '/proj/a');
+    insertMessage('s1', 'user');
+    poller.tick();
+    const start = events.find((e) => e.envelope.hook_event_name === 'SessionStart');
+    expect(start?.envelope.confirmed).toBe(true);
+  });
+
   // exp_bucket keys directory-scoped EXP for hermes agents: always the stable
   // persona bucket ('hermes-<source>'), never the raw cwd, so leveling survives
   // session-id rotation and cwd churn.

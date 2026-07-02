@@ -270,6 +270,31 @@ export class HookEventHandler {
         if (normEvent.source === 'resume' && transcriptPath) {
           this.lifecycleCallbacks.onSessionResume?.(transcriptPath);
         }
+        // Poller-vouched immediate adoption (Wave 4 FIX 8): the
+        // pending->confirmation filter above exists for transient Claude
+        // Extension sessions that fire SessionStart+SessionEnd with no
+        // activity -- it is wrong for a hooks-only provider's poller, which
+        // has ALREADY verified liveness (DB holders / fresh rows) and whose
+        // IDLE sessions never produce a follow-up event to confirm them
+        // (verified live: 5 announced, 0 confirmed, parked pending forever).
+        // `confirmed: true` on the raw envelope is that vouch; the wave-3
+        // identifying-fields guard (canAdopt above) still applies first.
+        if (!this.provider.usesTranscriptFile && event.confirmed === true) {
+          if (debug)
+            console.log(
+              `[Pixel Agents] Hook: SessionStart(source=${source}) -> poller-vouched external session ${sid}..., adopting immediately`,
+            );
+          this.lifecycleCallbacks.onExternalSessionDetected?.(
+            event.session_id,
+            transcriptPath,
+            cwd ?? '',
+            this.provider.id,
+            personaKey,
+            folderHint,
+            expBucket,
+          );
+          return;
+        }
         if (debug && tracked)
           console.log(
             `[Pixel Agents] Hook: SessionStart(source=${source}) -> pending external session ${sid}..., awaiting confirmation`,
