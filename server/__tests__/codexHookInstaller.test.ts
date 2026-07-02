@@ -145,4 +145,81 @@ describe('codexHookInstaller', () => {
     await expect(installHooks()).resolves.toBeUndefined();
     expect(fs.existsSync(path.join(tmpBase, '.codex'))).toBe(false);
   });
+
+  it('escapes backslashes in trust-state TOML keys and round-trips through uninstall', async () => {
+    // Windows-style paths contain backslashes, which start escape sequences
+    // in TOML basic strings. Backslash is a legal POSIX filename character,
+    // so we can reproduce the shape on this machine without mocking path.
+    const root = tmpBase;
+    const winHome = path.join(root, 'win\\style');
+    try {
+      fs.mkdirSync(path.join(winHome, '.codex'), { recursive: true });
+      fs.writeFileSync(path.join(winHome, '.codex', 'config.toml'), 'model = "gpt-5.2-codex"\n');
+      tmpBase = winHome; // os.homedir() mock now resolves here
+
+      await installHooks();
+      const tomlPath = path.join(winHome, '.codex', 'config.toml');
+      const rawHooksJsonPath = path.join(winHome, '.codex', 'hooks.json');
+      const escapedPrefix = rawHooksJsonPath.replace(/\\/g, '\\\\');
+      const toml = fs.readFileSync(tomlPath, 'utf-8');
+      expect(toml).toContain(`[hooks.state."${escapedPrefix}:pre_tool_use:0:0"]`);
+
+      await uninstallHooks();
+      const tomlAfter = fs.readFileSync(tomlPath, 'utf-8');
+      expect(tomlAfter).not.toContain('[hooks.state."'); // strip matched what we wrote, exactly
+      expect(tomlAfter).toContain('model = "gpt-5.2-codex"'); // foreign content untouched
+    } finally {
+      tmpBase = root;
+    }
+  });
+
+  it('rolls back hooks.json when the config.toml write fails (hooks.json existed before, foreign content)', async () => {
+    const foreignHooks =
+      JSON.stringify(
+        {
+          hooks: {
+            PreToolUse: [
+              { matcher: '', hooks: [{ type: 'command', command: 'foreign-hook', timeout: 3 }] },
+            ],
+          },
+        },
+        null,
+        2,
+      ) + '\n';
+    fs.writeFileSync(path.join(tmpBase, '.codex', 'hooks.json'), foreignHooks);
+    // Block atomicWrite's tmp file for config.toml (no fs mocking needed).
+    fs.mkdirSync(path.join(tmpBase, '.codex', 'config.toml.pixel-agents-tmp'));
+
+    await expect(installHooks()).rejects.toThrow(/Codex trust update failed/);
+
+    expect(fs.readFileSync(path.join(tmpBase, '.codex', 'hooks.json'), 'utf-8')).toBe(foreignHooks);
+  });
+
+  it('removes hooks.json when the config.toml write fails and hooks.json did not exist before', async () => {
+    expect(fs.existsSync(path.join(tmpBase, '.codex', 'hooks.json'))).toBe(false);
+    fs.mkdirSync(path.join(tmpBase, '.codex', 'config.toml.pixel-agents-tmp'));
+
+    await expect(installHooks()).rejects.toThrow(/Codex trust update failed/);
+
+    expect(fs.existsSync(path.join(tmpBase, '.codex', 'hooks.json'))).toBe(false);
+  });
+
+  it('rolls back hooks.json when the config.toml write fails during uninstall', async () => {
+    await installHooks();
+    const hooksBefore = fs.readFileSync(path.join(tmpBase, '.codex', 'hooks.json'), 'utf-8');
+    fs.mkdirSync(path.join(tmpBase, '.codex', 'config.toml.pixel-agents-tmp'));
+
+    await expect(uninstallHooks()).rejects.toThrow(/Codex trust cleanup failed/);
+
+    expect(fs.readFileSync(path.join(tmpBase, '.codex', 'hooks.json'), 'utf-8')).toBe(hooksBefore);
+  });
+
+  it('rejects and leaves hooks.json untouched when it exists but is malformed JSON', async () => {
+    const garbage = '{ this is not valid json';
+    fs.writeFileSync(path.join(tmpBase, '.codex', 'hooks.json'), garbage);
+
+    await expect(installHooks()).rejects.toThrow(/hooks\.json/);
+
+    expect(fs.readFileSync(path.join(tmpBase, '.codex', 'hooks.json'), 'utf-8')).toBe(garbage);
+  });
 });
