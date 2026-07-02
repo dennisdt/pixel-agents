@@ -24,6 +24,8 @@ core/                                Protocol + interface definitions (zero runt
 
 server/                              Lifecycle runtime + Fastify HTTP/WS server
   src/
+    providers/hook/codex/            Codex HookProvider — Claude-schema events, ~/.codex/hooks.json + trust hashes
+    providers/hook/hermes/           LOCAL-ONLY Hermes provider — read-only ~/.hermes/state.db poller
     providers/hook/claude/           Reference HookProvider — only place that knows Claude specifics
       claude.ts                      normalizeHookEvent for 11 Claude events, formatToolStatus, file fallback
       claudeTeamProvider.ts          TeamProvider: reads ~/.claude/teams/<name>/config.json
@@ -215,13 +217,23 @@ export type TransportState = 'connecting' | 'connected' | 'reconnecting' | 'disc
 
 ## Provider Abstraction
 
-`HookProvider` (`core/src/provider.ts`) is the integration boundary. Today only Claude Code is implemented; the Claude provider supports every transcript/hook format up to **Claude Code v2.1.220** (current as of 2026-07-30 — Task-era `agent_progress` records, explicit and implicit teams, background-by-default Agent spawns, sidecar-backed background agents). Newer CLI releases may add formats that need provider updates. The interface:
+`HookProvider` (`core/src/provider.ts`) is the integration boundary. Claude Code is the reference implementation; Codex and Hermes ship alongside it (see Multi-provider dispatch below). The Claude provider supports every transcript/hook format up to **Claude Code v2.1.220** (current as of 2026-07-30 — Task-era `agent_progress` records, explicit and implicit teams, background-by-default Agent spawns, sidecar-backed background agents). Newer CLI releases may add formats that need provider updates. The interface:
 
 - **Required**: `normalizeHookEvent(raw)` → `{ sessionId, event: AgentEvent } | null`; `installHooks` / `uninstallHooks` / `areHooksInstalled`; `formatToolStatus`; `permissionExemptTools`, `subagentToolNames`, `readingTools` sets.
 - **Optional file fallback**: `getSessionDirs(workspace)`, `getAllSessionRoots()`, `sessionFilePattern`, `parseTranscriptLine(line)`, `buildLaunchCommand(sessionId, cwd, opts)`. Used when hooks aren't installed.
 - **Optional team extension**: `team?: TeamProvider` for Lead + Teammates support.
 
 `AgentEvent.kind` values: `toolStart`, `toolEnd`, `turnEnd`, `subagentStart`, `subagentEnd`, `subagentTurnEnd`, `progress`, `permissionRequest`, `sessionStart`, `sessionEnd`. The runtime dispatches on `kind`, never on CLI-specific tool names.
+
+### Multi-provider dispatch
+
+`AgentRuntime` keeps one `HookEventHandler` per registered `HookProvider`, keyed by provider id. `POST /api/hooks/:providerId` (`server/src/httpServer.ts`) routes each event to its handler; unregistered ids are dropped defensively. The hook script (`providers/hook/claude/hooks/claude-hook.ts`) is shared by every CLI — it takes the provider route as `argv[2]`, defaulting to `'claude'` so existing installs keep working. JSONL polling is gated to the primary (claude) provider: Codex/Hermes agents get no transcript-based tool content.
+
+Provider identity on the wire: `agentCreated.provider`, `existingAgents.providers` (id→providerId), and one `providerCapabilities` message per registered provider (`providerId`, `readingTools`, `subagentToolNames`). `ToolOverlay` renders a small text badge for non-claude providers (`PROVIDER_BADGE_LABELS`/`_COLORS` in `webview-ui/src/constants.ts`); Claude is the majority default and stays unbadged. `PersistedAgent` carries `provider` and `personaKey`.
+
+**Codex**: near-Claude clone — installer writes `~/.codex/hooks.json`, no `getSessionDirs`/`parseTranscriptLine`/`team`. Codex (0.142+) speaks the Claude hooks JSON schema and Claude-compatible tool names (`tool_name: "Bash"`, not `exec_command`), so `codex.ts` reuses Claude's `formatToolStatus` verbatim. Trust-hash maintenance in `config.toml [hooks.state]`: Codex re-hashes each hook command on every start and drops untrusted ones, so any edit invalidates trust — `codexHookInstaller.ts` recomputes and rewrites the sha256 hashes on every install (verified against `openai/codex@129ea2a`, codex-cli 0.142.4). No `SessionEnd` hook, so session end is detected via mtime staleness on the rollout file (kept as `jsonlFile` for that purpose). No sub-agents, and no launch — Codex agents are adopted from existing terminals, never spawned by "+ Agent".
+
+**Hermes (local-only, preserve across upstream merges)**: read-only poller (`hermesPoller.ts`) over `~/.hermes/state.db` synthesizing Claude-shaped envelopes (toolStart/toolEnd/turnEnd/sessionStart/sessionEnd) into `handleHookEvent`. Persona continuity: `personaKey = source:cwd` lets a rotating session id reattach to the same character (`resolvePersonaAgent`/`reattachSession`) instead of spawning a new one. Gated by `standalone.hermesEnabled` in `~/.pixel-agents/config.json` (default off); only the web app's `cli.ts` starts the poller. No permission bubbles — the synthesized event set has no Notification/PermissionRequest kind.
 
 ### TeamProvider (Lead + Teammates)
 
