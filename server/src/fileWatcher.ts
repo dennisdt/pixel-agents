@@ -610,6 +610,13 @@ export function setHookProvider(provider: HookProvider): void {
   hookProvider = provider;
 }
 
+/** Get the active (primary, file-watching) HookProvider, if set. Only that
+ *  provider's transcripts are parseable by transcriptParser — used by
+ *  adoptExternalSessionFromHook to gate watcher/poll starts for other providers. */
+export function getFileWatcherHookProvider(): HookProvider | null {
+  return hookProvider;
+}
+
 /**
  * Resolves an external agent's `cwd`/`projectDir` to its `WorkspaceFolder.name` —
  * the label the Areas UI keys on. Registered by the VS Code adapter; unset in
@@ -1096,6 +1103,11 @@ export function adoptExternalSessionFromHook(
       folderNameResolver?.({ cwd, projectDir }) ??
       folderNameFromProjectDir(path.basename(projectDir));
 
+    // Only the primary (file-watching) provider's transcripts are parseable by
+    // transcriptParser. Other providers' agents keep jsonlFile for mtime-based
+    // staleness but are driven purely by hook events.
+    const parseable = providerId === getFileWatcherHookProvider()?.id;
+
     // The hook delivered the authoritative cwd — pass it down so the display
     // name is right even when the transcript is still empty (SessionStart fires
     // before the first JSONL record lands).
@@ -1111,6 +1123,7 @@ export function adoptExternalSessionFromHook(
       persistAgents,
       folderName,
       cwd,
+      parseable,
     );
 
     if (debug) {
@@ -1181,6 +1194,13 @@ function adoptExternalSession(
   persistAgents: () => void,
   folderName?: string,
   knownCwd?: string,
+  // Whether to start JSONL watching/polling for this agent. Defaults to true for
+  // the filesystem-based scanners (scanExternalDir, scanGlobalProjectDirs), which
+  // only ever discover the primary provider's own transcripts. Hook-driven adoption
+  // (adoptExternalSessionFromHook) passes this explicitly per-provider: non-primary
+  // providers' transcripts (e.g. Codex rollout files) are not Claude-transcript-shaped,
+  // so parsing them would emit garbage -- their agents are driven purely by hook events.
+  startWatching = true,
 ): AgentState {
   const id = nextAgentIdRef.current++;
   // Decide whether to replay the existing file content or skip to its end.
@@ -1254,16 +1274,18 @@ function adoptExternalSession(
   // Log is emitted by the caller (adoptExternalSessionFromHook or scanExternalDir)
   // to use the correct prefix (Hook: vs Watcher:).
 
-  startFileWatching(
-    id,
-    jsonlFile,
-    agents,
-    fileWatchers,
-    pollingTimers,
-    waitingTimers,
-    permissionTimers,
-  );
-  readNewLines(id, agents, waitingTimers, permissionTimers);
+  if (startWatching) {
+    startFileWatching(
+      id,
+      jsonlFile,
+      agents,
+      fileWatchers,
+      pollingTimers,
+      waitingTimers,
+      permissionTimers,
+    );
+    readNewLines(id, agents, waitingTimers, permissionTimers);
+  }
   return agent;
 }
 

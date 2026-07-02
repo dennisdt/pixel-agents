@@ -24,7 +24,7 @@ import { readConfig } from './configPersistence.js';
 import { MAX_PORT, MIN_PORT } from './constants.js';
 import { flushDirectoryStats, loadDirectoryStats } from './directoryStats.js';
 import { FileStateAdapter } from './fileStateAdapter.js';
-import { claudeProvider, copyHookScript } from './providers/index.js';
+import { claudeProvider, codexProvider, copyHookScript } from './providers/index.js';
 import { PixelAgentsServer } from './server.js';
 
 // ── Argument parsing ──────────────────────────────────────────
@@ -125,7 +125,7 @@ async function main(): Promise<void> {
 
   try {
     // Create runtime first (before server.start, so we can pass it in)
-    const runtime = new AgentRuntime(store, [claudeProvider]);
+    const runtime = new AgentRuntime(store, [claudeProvider, codexProvider]);
 
     // Wire hook events: HTTP POST -> runtime -> hookEventHandler -> agents
     server.onHookEvent((providerId, event) => {
@@ -134,14 +134,31 @@ async function main(): Promise<void> {
 
     // onSetHooksEnabled side effect: install/uninstall hooks when user toggles in UI.
     // Captures config from the outer scope after server.start().
+    // Each provider's install/uninstall is independently try/caught: the codex
+    // installer throws on config.toml failure (write-both-or-neither rollback)
+    // and one provider's failure must not break the toggle for the others or
+    // become an unhandled rejection.
     let currentConfig: { port: number; token: string } | null = null;
     const onSetHooksEnabled = async (enabled: boolean): Promise<void> => {
       if (!currentConfig) return;
+      for (const provider of runtime.getProviders()) {
+        try {
+          if (enabled) {
+            await provider.installHooks(
+              `http://127.0.0.1:${currentConfig.port}`,
+              currentConfig.token,
+            );
+          } else {
+            await provider.uninstallHooks();
+          }
+        } catch (err) {
+          console.error(
+            `[Pixel Agents] Failed to ${enabled ? 'install' : 'uninstall'} hooks for provider "${provider.id}":`,
+            err,
+          );
+        }
+      }
       if (enabled) {
-        await claudeProvider.installHooks(
-          `http://127.0.0.1:${currentConfig.port}`,
-          currentConfig.token,
-        );
         const copied = copyHookScript(packageRoot);
         console.log(
           copied
@@ -149,7 +166,6 @@ async function main(): Promise<void> {
             : '[Pixel Agents] Hooks NOT installed (user toggle), hook script missing',
         );
       } else {
-        await claudeProvider.uninstallHooks();
         console.log('[Pixel Agents] Hooks uninstalled (user toggle)');
       }
     };
@@ -210,19 +226,26 @@ async function main(): Promise<void> {
     runtime.hooksEnabled.current = adapter.getSetting('pixel-agents.hooksEnabled', true);
     runtime.watchAllSessions.current = adapter.getSetting('pixel-agents.watchAllSessions', false);
 
-    // Install hooks on startup if the persisted setting says so
+    // Install hooks on startup if the persisted setting says so. Each provider's
+    // install is independently try/caught (see onSetHooksEnabled above) so a
+    // failure for one (e.g. codex without ~/.codex) doesn't block the others.
     if (runtime.hooksEnabled.current) {
-      try {
-        await claudeProvider.installHooks(`http://127.0.0.1:${config.port}`, config.token);
-        const copied = copyHookScript(packageRoot);
-        console.log(
-          copied
-            ? '[Pixel Agents] Hooks installed'
-            : '[Pixel Agents] Hooks NOT installed, hook script missing',
-        );
-      } catch (err) {
-        console.error('[Pixel Agents] Failed to install hooks:', err);
+      for (const provider of runtime.getProviders()) {
+        try {
+          await provider.installHooks(`http://127.0.0.1:${config.port}`, config.token);
+        } catch (err) {
+          console.error(
+            `[Pixel Agents] Failed to install hooks for provider "${provider.id}":`,
+            err,
+          );
+        }
       }
+      const copied = copyHookScript(packageRoot);
+      console.log(
+        copied
+          ? '[Pixel Agents] Hooks installed'
+          : '[Pixel Agents] Hooks NOT installed, hook script missing',
+      );
     }
 
     // Start scanning for external sessions (Claude running in user's terminal)

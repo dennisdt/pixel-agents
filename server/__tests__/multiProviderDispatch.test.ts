@@ -1,9 +1,18 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import type * as fs from 'fs';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import type { HookProvider } from '../../core/src/provider.js';
 import { AgentRuntime } from '../src/agentRuntime.js';
 import { AgentStateStore } from '../src/agentStateStore.js';
+import { DismissalTracker } from '../src/dismissalTracker.js';
+import {
+  adoptExternalSessionFromHook,
+  setDismissalTracker,
+  setHookProvider,
+} from '../src/fileWatcher.js';
 import { HookEventHandler } from '../src/hookEventHandler.js';
+import { claudeProvider } from '../src/providers/hook/claude/claude.js';
+import { codexProvider } from '../src/providers/hook/codex/codex.js';
 import { SessionRouter } from '../src/sessionRouter.js';
 import type { AgentState } from '../src/types.js';
 
@@ -166,5 +175,101 @@ describe('multi-provider dispatch', () => {
     expect(
       messages.some((m) => m.type === 'agentStatus' && m.id === 4 && m.status === 'active'),
     ).toBe(true);
+  });
+
+  it('claude + codex providers coexist without cross-talk', () => {
+    const runtime = new AgentRuntime(store, [claudeProvider, codexProvider]);
+    store.set(1, createTestAgent({ id: 1, providerId: 'claude' }));
+    store.set(2, createTestAgent({ id: 2, providerId: 'codex' }));
+    runtime.registerAgent('claude-sess', 1);
+    runtime.registerAgent('codex-sess', 2);
+
+    runtime.handleHookEvent('codex', { hook_event_name: 'Stop', session_id: 'codex-sess' });
+    const statuses = messages.filter((m) => m.type === 'agentStatus');
+    expect(statuses.every((m) => m.id === 2)).toBe(true);
+  });
+});
+
+describe('adoptExternalSessionFromHook: transcript watching gated to primary provider', () => {
+  // AgentRuntime's constructor is what normally calls setHookProvider(primary) on
+  // fileWatcher.ts's module-level singleton; these tests call adoptExternalSessionFromHook
+  // directly, so seed the same module state by hand.
+  let localStore: AgentStateStore;
+  let knownJsonlFiles: Set<string>;
+  let nextAgentIdRef: { current: number };
+  let fileWatchers: Map<number, fs.FSWatcher>;
+  let pollingTimers: Map<number, ReturnType<typeof setInterval>>;
+  let waitingTimers: Map<number, ReturnType<typeof setTimeout>>;
+  let permissionTimers: Map<number, ReturnType<typeof setTimeout>>;
+
+  beforeEach(() => {
+    setDismissalTracker(new DismissalTracker());
+    // claude is the primary (index 0) provider in every real runtime wiring
+    // (cli.ts, PixelAgentsViewProvider.ts): [claudeProvider, codexProvider].
+    setHookProvider(claudeProvider);
+
+    localStore = new AgentStateStore();
+    knownJsonlFiles = new Set();
+    nextAgentIdRef = { current: 1 };
+    fileWatchers = new Map();
+    pollingTimers = new Map();
+    waitingTimers = new Map();
+    permissionTimers = new Map();
+  });
+
+  afterEach(() => {
+    for (const t of pollingTimers.values()) clearInterval(t);
+    for (const t of waitingTimers.values()) clearTimeout(t);
+    for (const t of permissionTimers.values()) clearTimeout(t);
+  });
+
+  it('adopts a non-primary (codex) session with jsonlFile set but no watcher/poll timer', () => {
+    adoptExternalSessionFromHook(
+      'codex-sess',
+      '/tmp/pxl-test/codex-session.jsonl',
+      '/tmp/pxl-test',
+      'codex',
+      knownJsonlFiles,
+      nextAgentIdRef,
+      localStore,
+      fileWatchers,
+      pollingTimers,
+      waitingTimers,
+      permissionTimers,
+      () => {},
+    );
+
+    expect(localStore.size).toBe(1);
+    const agent = [...localStore.values()][0];
+    expect(agent.providerId).toBe('codex');
+    expect(agent.jsonlFile).toBe('/tmp/pxl-test/codex-session.jsonl');
+    // No watcher/poll timer registered for a non-parseable provider's transcript.
+    expect(pollingTimers.size).toBe(0);
+    expect(fileWatchers.size).toBe(0);
+  });
+
+  it('adopts a primary (claude) session and starts the watcher/poll timer', () => {
+    adoptExternalSessionFromHook(
+      'claude-sess',
+      '/tmp/pxl-test/claude-session.jsonl',
+      '/tmp/pxl-test',
+      'claude',
+      knownJsonlFiles,
+      nextAgentIdRef,
+      localStore,
+      fileWatchers,
+      pollingTimers,
+      waitingTimers,
+      permissionTimers,
+      () => {},
+    );
+
+    expect(localStore.size).toBe(1);
+    const agent = [...localStore.values()][0];
+    expect(agent.providerId).toBe('claude');
+    expect(agent.jsonlFile).toBe('/tmp/pxl-test/claude-session.jsonl');
+    // The primary provider's transcript is parseable -> watcher/poll timer starts.
+    expect(pollingTimers.size).toBe(1);
+    expect(pollingTimers.has(agent.id)).toBe(true);
   });
 });

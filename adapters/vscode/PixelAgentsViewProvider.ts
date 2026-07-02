@@ -34,7 +34,7 @@ import {
   writeLayoutToFile,
 } from '../../server/src/layoutPersistence.js';
 import { PathSet } from '../../server/src/pathKey.js';
-import { claudeProvider, copyHookScript } from '../../server/src/providers/index.js';
+import { claudeProvider, codexProvider, copyHookScript } from '../../server/src/providers/index.js';
 import { PixelAgentsServer } from '../../server/src/server.js';
 import {
   getProjectDirPath,
@@ -165,7 +165,7 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
     });
 
     // Create shared runtime (owns timer Maps, scanners, hook handler, dismissal tracker)
-    this.runtime = new AgentRuntime(this.store, [claudeProvider]);
+    this.runtime = new AgentRuntime(this.store, [claudeProvider, codexProvider]);
 
     this.initServer();
   }
@@ -212,7 +212,19 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
         const hooksEnabled = this.adapter.getSetting<boolean>(GLOBAL_KEY_HOOKS_ENABLED, true);
         this.runtime.hooksEnabled.current = hooksEnabled;
         if (hooksEnabled) {
-          void claudeProvider.installHooks(`http://127.0.0.1:${config.port}`, config.token);
+          // Each provider's install is independently try/caught: the codex installer
+          // throws on config.toml failure and one provider's failure must not break
+          // the others or become an unhandled rejection.
+          for (const provider of this.runtime.getProviders()) {
+            provider
+              .installHooks(`http://127.0.0.1:${config.port}`, config.token)
+              .catch((err) =>
+                console.error(
+                  `[Pixel Agents] Failed to install hooks for provider "${provider.id}":`,
+                  err,
+                ),
+              );
+          }
           if (!copyHookScript(this.context.extensionPath)) {
             console.warn('[Pixel Agents] Hook script not copied, hooks may not fire');
           }
@@ -303,12 +315,25 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
         const enabled = message.enabled as boolean;
         this.adapter.setSetting(GLOBAL_KEY_HOOKS_ENABLED, enabled);
         this.runtime.hooksEnabled.current = enabled;
+        // Each provider's install/uninstall is independently try/caught: the codex
+        // installer throws on config.toml failure (write-both-or-neither rollback)
+        // and one provider's failure must not break the toggle for the others or
+        // become an unhandled rejection.
         if (enabled) {
           const serverConfig = this.pixelAgentsServer?.getConfig();
-          void claudeProvider.installHooks(
-            serverConfig ? `http://127.0.0.1:${serverConfig.port}` : '',
-            serverConfig?.token ?? '',
-          );
+          for (const provider of this.runtime.getProviders()) {
+            provider
+              .installHooks(
+                serverConfig ? `http://127.0.0.1:${serverConfig.port}` : '',
+                serverConfig?.token ?? '',
+              )
+              .catch((err) =>
+                console.error(
+                  `[Pixel Agents] Failed to install hooks for provider "${provider.id}":`,
+                  err,
+                ),
+              );
+          }
           const copied = copyHookScript(this.context.extensionPath);
           console.log(
             copied
@@ -316,7 +341,16 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
               : '[Pixel Agents] Hooks NOT fully enabled, hook script missing',
           );
         } else {
-          void claudeProvider.uninstallHooks();
+          for (const provider of this.runtime.getProviders()) {
+            provider
+              .uninstallHooks()
+              .catch((err) =>
+                console.error(
+                  `[Pixel Agents] Failed to uninstall hooks for provider "${provider.id}":`,
+                  err,
+                ),
+              );
+          }
           console.log('[Pixel Agents] Hooks disabled by user');
         }
       } else if (message.type === 'setHooksInfoShown') {
