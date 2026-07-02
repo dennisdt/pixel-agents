@@ -43,6 +43,14 @@ export const CODEX_HOOK_TIMEOUT_SEC = 5;
  *  objects; this generous bound avoids truncating one while avoiding a full
  *  read of a potentially large rollout file. */
 export const CODEX_SESSION_META_READ_BYTES = 65_536; // 64KB
+/** How many day-directories (today backwards) under ~/.codex/sessions/ the
+ *  process scan searches when matching a live process cwd to its rollout.
+ *  Tradeoff: a session started more than this many days ago AND with no
+ *  rollout writes since (mtime ordering scans by date DIRECTORY, whose date
+ *  never changes) is not matched -- rare, since sessions that old and idle
+ *  are usually dead; bounding the walk keeps the 5s scan tick from crawling
+ *  an unbounded session archive. */
+export const CODEX_SESSIONS_SCAN_DAYS = 2; // today + yesterday
 
 // ── Output-token EXP (codexTokenReader.ts) ──────────────────
 /** `type` value of the rollout JSONL records carrying cumulative session token

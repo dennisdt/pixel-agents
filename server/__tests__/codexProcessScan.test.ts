@@ -112,37 +112,134 @@ describe('readCodexSessionMeta', () => {
   });
 });
 
-describe('listLiveCodexSessions (injected lister)', () => {
+// FIX 7 (Wave 4): codex does NOT hold its rollout file open between events
+// (verified live: `lsof -p <pid>` shows zero rollout handles for an idle
+// `codex --yolo` -- it appends and closes). Liveness is therefore resolved by
+// PROCESS CWD: each live codex process's working directory is matched to the
+// newest recent rollout whose session_meta payload.cwd equals it. Both the
+// process-cwd lister and the sessions root are injected so tests never touch
+// real processes or ~/.codex.
+describe('listLiveCodexSessions (cwd matching, injected process-cwd lister)', () => {
   let tmpDir: string;
+  let sessionsRoot: string;
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-codex-live-'));
+    sessionsRoot = path.join(tmpDir, 'sessions');
   });
 
   afterEach(() => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  function writeRollout(name: string, sessionId: string, cwd: string): string {
-    const file = path.join(tmpDir, name);
+  /** sessionsRoot/YYYY/MM/DD for `daysAgo` days before now (created). */
+  function dateDir(daysAgo: number): string {
+    const d = new Date(Date.now() - daysAgo * 86_400_000);
+    const dir = path.join(
+      sessionsRoot,
+      String(d.getFullYear()),
+      String(d.getMonth() + 1).padStart(2, '0'),
+      String(d.getDate()).padStart(2, '0'),
+    );
+    fs.mkdirSync(dir, { recursive: true });
+    return dir;
+  }
+
+  function writeRollout(
+    dir: string,
+    name: string,
+    sessionId: string,
+    cwd: string,
+    mtime?: Date,
+  ): string {
+    const file = path.join(dir, name);
     fs.writeFileSync(
       file,
       `${JSON.stringify({ type: 'session_meta', payload: { session_id: sessionId, cwd } })}\n`,
     );
+    if (mtime) fs.utimesSync(file, mtime, mtime);
     return file;
   }
 
-  it('resolves each open rollout file returned by the injected lister to a session', () => {
-    const file = writeRollout('rollout-1.jsonl', 'sess-1', '/tmp/proj-1');
-    const sessions = realListLiveCodexSessions(() => [file]);
-    expect(sessions).toEqual([{ sessionId: 'sess-1', rolloutFile: file, cwd: '/tmp/proj-1' }]);
+  it('resolves two live processes in different cwds to their two sessions', () => {
+    const today = dateDir(0);
+    const fileA = writeRollout(today, 'rollout-a.jsonl', 'sess-a', '/tmp/proj-a');
+    const fileB = writeRollout(today, 'rollout-b.jsonl', 'sess-b', '/tmp/proj-b');
+
+    const sessions = realListLiveCodexSessions(() => ['/tmp/proj-a', '/tmp/proj-b'], sessionsRoot);
+
+    expect(sessions).toHaveLength(2);
+    expect(sessions).toContainEqual({
+      sessionId: 'sess-a',
+      rolloutFile: fileA,
+      cwd: '/tmp/proj-a',
+    });
+    expect(sessions).toContainEqual({
+      sessionId: 'sess-b',
+      rolloutFile: fileB,
+      cwd: '/tmp/proj-b',
+    });
   });
 
-  it('skips files whose first line cannot be parsed as session_meta', () => {
-    const good = writeRollout('rollout-good.jsonl', 'sess-good', '/tmp/proj');
-    const bad = path.join(tmpDir, 'rollout-bad.jsonl');
+  it('skips a live process cwd with no matching rollout', () => {
+    const today = dateDir(0);
+    writeRollout(today, 'rollout-a.jsonl', 'sess-a', '/tmp/proj-a');
+
+    const sessions = realListLiveCodexSessions(
+      () => ['/tmp/proj-a', '/tmp/proj-unmatched'],
+      sessionsRoot,
+    );
+
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]?.cwd).toBe('/tmp/proj-a');
+  });
+
+  it('picks the newest rollout by mtime when several share a cwd', () => {
+    const today = dateDir(0);
+    const yesterday = dateDir(1);
+    writeRollout(
+      yesterday,
+      'rollout-old.jsonl',
+      'sess-old',
+      '/tmp/proj',
+      new Date(Date.now() - 30 * 3_600_000),
+    );
+    const newest = writeRollout(
+      today,
+      'rollout-new.jsonl',
+      'sess-new',
+      '/tmp/proj',
+      new Date(Date.now() - 60_000),
+    );
+
+    const sessions = realListLiveCodexSessions(() => ['/tmp/proj'], sessionsRoot);
+
+    expect(sessions).toEqual([{ sessionId: 'sess-new', rolloutFile: newest, cwd: '/tmp/proj' }]);
+  });
+
+  it('ignores rollouts outside the scanned date window (today + yesterday)', () => {
+    const oldDir = dateDir(5);
+    writeRollout(oldDir, 'rollout-ancient.jsonl', 'sess-ancient', '/tmp/proj-old');
+
+    const sessions = realListLiveCodexSessions(() => ['/tmp/proj-old'], sessionsRoot);
+
+    expect(sessions).toEqual([]);
+  });
+
+  it('skips rollouts whose first line cannot be parsed as session_meta', () => {
+    const today = dateDir(0);
+    const bad = path.join(today, 'rollout-bad.jsonl');
     fs.writeFileSync(bad, 'not json\n');
-    const sessions = realListLiveCodexSessions(() => [good, bad]);
+    const good = writeRollout(
+      today,
+      'rollout-good.jsonl',
+      'sess-good',
+      '/tmp/proj',
+      new Date(Date.now() - 3_600_000), // older than the malformed file
+    );
+
+    const sessions = realListLiveCodexSessions(() => ['/tmp/proj'], sessionsRoot);
+
     expect(sessions).toEqual([{ sessionId: 'sess-good', rolloutFile: good, cwd: '/tmp/proj' }]);
   });
 
@@ -150,8 +247,12 @@ describe('listLiveCodexSessions (injected lister)', () => {
     expect(
       realListLiveCodexSessions(() => {
         throw new Error('ps/lsof failed');
-      }),
+      }, sessionsRoot),
     ).toEqual([]);
+  });
+
+  it('returns [] when the sessions root does not exist', () => {
+    expect(realListLiveCodexSessions(() => ['/tmp/proj'], path.join(tmpDir, 'nope'))).toEqual([]);
   });
 });
 
