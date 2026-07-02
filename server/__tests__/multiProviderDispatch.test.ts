@@ -22,7 +22,7 @@ import { HookEventHandler } from '../src/hookEventHandler.js';
 import { claudeProvider } from '../src/providers/hook/claude/claude.js';
 import { codexProvider } from '../src/providers/hook/codex/codex.js';
 import { SessionRouter } from '../src/sessionRouter.js';
-import type { AgentState } from '../src/types.js';
+import type { AgentState, PersistedAgent } from '../src/types.js';
 
 /** Minimal AgentState for testing (copied from hookEventHandler.test.ts — keep the cast). */
 function createTestAgent(overrides: Partial<AgentState> = {}): AgentState {
@@ -429,5 +429,76 @@ describe('startStaleExternalAgentCheck: hooks-mode reaping gated by provider', (
     expect(store.has(10)).toBe(false);
     // Claude keeps the hooks-mode skip -- SessionEnd is its cleanup path.
     expect(store.has(11)).toBe(true);
+  });
+});
+
+describe('AgentRuntime.restoreExternalAgents: transcript watching gated to primary provider', () => {
+  let store: AgentStateStore;
+  let runtime: AgentRuntime;
+  let tmpDir: string;
+
+  function persistedAgent(overrides: Partial<PersistedAgent>): PersistedAgent {
+    return {
+      id: 1,
+      sessionId: 'sess',
+      terminalName: '',
+      isExternal: true,
+      jsonlFile: '/nonexistent',
+      projectDir: '/nonexistent',
+      ...overrides,
+    };
+  }
+
+  beforeEach(() => {
+    setHookProvider(claudeProvider); // primary = claude, mirrors real wiring
+    store = new AgentStateStore();
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-restore-test-'));
+  });
+
+  afterEach(() => {
+    runtime.dispose();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('does not start a watcher for a restored codex agent, but does for claude/legacy', () => {
+    const codexFile = path.join(tmpDir, 'codex-sess.jsonl');
+    const claudeFile = path.join(tmpDir, 'claude-sess.jsonl');
+    const legacyFile = path.join(tmpDir, 'legacy-sess.jsonl');
+    fs.writeFileSync(codexFile, '');
+    fs.writeFileSync(claudeFile, '');
+    fs.writeFileSync(legacyFile, '');
+
+    const persisted: PersistedAgent[] = [
+      persistedAgent({ id: 1, sessionId: 'codex-sess', jsonlFile: codexFile, provider: 'codex' }),
+      persistedAgent({
+        id: 2,
+        sessionId: 'claude-sess',
+        jsonlFile: claudeFile,
+        provider: 'claude',
+      }),
+      // No `provider` field: predates multi-provider support, was always Claude.
+      persistedAgent({ id: 3, sessionId: 'legacy-sess', jsonlFile: legacyFile }),
+    ];
+
+    store.setAdapter({
+      saveAgents: () => {},
+      loadAgents: () => persisted,
+      getSetting: (_k: string, d: unknown) => d,
+      setSetting: () => {},
+      saveSeats: () => {},
+      loadSeats: () => ({}),
+    } as never);
+
+    runtime = new AgentRuntime(store, [claudeProvider, codexProvider]);
+    runtime.restoreExternalAgents();
+
+    // All three are restored (character appears, jsonlFile kept for staleness).
+    expect(store.size).toBe(3);
+    expect(store.get(1)?.providerId).toBe('codex');
+
+    // Only the primary provider's transcripts get a watcher/poll timer.
+    expect(runtime.pollingTimers.has(1)).toBe(false); // codex: no watcher
+    expect(runtime.pollingTimers.has(2)).toBe(true); // claude: watcher started
+    expect(runtime.pollingTimers.has(3)).toBe(true); // legacy (no provider): watcher started
   });
 });

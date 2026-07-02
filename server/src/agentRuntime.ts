@@ -26,6 +26,7 @@ import { DismissalTracker } from './dismissalTracker.js';
 import {
   adoptExternalSessionFromHook,
   ensureProjectScan,
+  getFileWatcherHookProvider,
   isTrackedProjectDir,
   reassignAgentToFile,
   scanForBackgroundAgentFiles,
@@ -746,15 +747,26 @@ export class AgentRuntime {
       try {
         const stat = fs.statSync(p.jsonlFile);
         agent.fileOffset = stat.size;
-        startFileWatching(
-          p.id,
-          p.jsonlFile,
-          this.store,
-          this.fileWatchers,
-          this.pollingTimers,
-          this.waitingTimers,
-          this.permissionTimers,
-        );
+        // Only the primary provider's transcripts are Claude-shaped and safe
+        // for transcriptParser (see adoptExternalSessionFromHook's `parseable`
+        // gate, applied at live-adoption time). Restoring from persistence must
+        // apply the same gate -- otherwise a restarted server starts parsing a
+        // Codex rollout file with the Claude transcript parser. The agent is
+        // still restored (character appears, jsonlFile kept for staleness);
+        // it just isn't watched/polled. Legacy persisted agents with no
+        // `provider` field predate multi-provider support and were always
+        // Claude, so they keep watching.
+        if (!p.provider || p.provider === getFileWatcherHookProvider()?.id) {
+          startFileWatching(
+            p.id,
+            p.jsonlFile,
+            this.store,
+            this.fileWatchers,
+            this.pollingTimers,
+            this.waitingTimers,
+            this.permissionTimers,
+          );
+        }
       } catch {
         /* ignore stat errors on restore */
       }
