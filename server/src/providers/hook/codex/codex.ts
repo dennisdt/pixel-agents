@@ -1,9 +1,11 @@
 import type { AgentEvent, HookProvider } from '../../../../../core/src/provider.js';
 import { formatToolStatus } from '../claude/claude.js';
+import {
+  areHooksInstalled as installerAreHooksInstalled,
+  installHooks as installerInstallHooks,
+  uninstallHooks as installerUninstallHooks,
+} from './codexHookInstaller.js';
 import { CODEX_TERMINAL_NAME_PREFIX } from './constants.js';
-
-// NOTE: installer wired in Task 7 — this task uses inline no-ops so the module
-// compiles and the normalize/format tests run before the installer exists.
 
 // ── formatToolStatus: Codex (0.142+) sends Claude-compatible tool names in its
 // hook payloads (tool_name: "Bash", not "exec_command" — confirmed by the Task 5
@@ -61,6 +63,20 @@ function normalizeHookEvent(
   }
 }
 
+// ── Installer wrappers: adapt no-arg signatures to the async interface ──
+
+function installHooks(_serverUrl: string, _authToken: string): Promise<void> {
+  return installerInstallHooks();
+}
+
+function uninstallHooks(): Promise<void> {
+  return installerUninstallHooks();
+}
+
+function areHooksInstalled(): Promise<boolean> {
+  return installerAreHooksInstalled();
+}
+
 export const codexProvider: HookProvider = {
   kind: 'hook',
   id: 'codex',
@@ -72,10 +88,9 @@ export const codexProvider: HookProvider = {
 
   normalizeHookEvent,
 
-  // Replaced with the real installer in Task 7.
-  installHooks: () => Promise.resolve(),
-  uninstallHooks: () => Promise.resolve(),
-  areHooksInstalled: () => Promise.resolve(false),
+  installHooks,
+  uninstallHooks,
+  areHooksInstalled,
 
   formatToolStatus,
   // Empty: the fixtures show no Task/Agent/AskUserQuestion-equivalent tool in
