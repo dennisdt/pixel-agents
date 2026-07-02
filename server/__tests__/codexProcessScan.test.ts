@@ -254,6 +254,63 @@ describe('listLiveCodexSessions (cwd matching, injected process-cwd lister)', ()
   it('returns [] when the sessions root does not exist', () => {
     expect(realListLiveCodexSessions(() => ['/tmp/proj'], path.join(tmpDir, 'nope'))).toEqual([]);
   });
+
+  // ── Wave 5 FIX 9: symlink boundary ─────────────────────────
+  // Live evidence: ~/projects is a symlink to /Volumes/.../projects. `lsof -d
+  // cwd` reports the PHYSICAL path, while a rollout's session_meta.cwd records
+  // whatever path codex was launched from (possibly the symlink form) — a raw
+  // string-equality match silently fails across the boundary. Both sides are
+  // realpath-normalized FOR COMPARISON ONLY; the returned session cwd stays
+  // the session_meta form (adoption/EXP already key on it).
+
+  it('matches when the process cwd is the physical path and session_meta.cwd is the symlink form', () => {
+    const physical = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-codex-phys-'));
+    const alias = path.join(tmpDir, 'proj-alias');
+    fs.symlinkSync(physical, alias);
+    try {
+      const today = dateDir(0);
+      const file = writeRollout(today, 'rollout-sym.jsonl', 'sess-sym', alias);
+
+      // lsof reports the fully-resolved physical path.
+      const lsofCwd = fs.realpathSync(physical);
+      const sessions = realListLiveCodexSessions(() => [lsofCwd], sessionsRoot);
+
+      // Matched across the boundary; returned cwd is the session_meta form.
+      expect(sessions).toEqual([{ sessionId: 'sess-sym', rolloutFile: file, cwd: alias }]);
+    } finally {
+      fs.rmSync(physical, { recursive: true, force: true });
+    }
+  });
+
+  it('matches in the reverse direction: process cwd is the symlink form, session_meta.cwd is physical', () => {
+    const physical = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-codex-phys-'));
+    const alias = path.join(tmpDir, 'proj-alias-rev');
+    fs.symlinkSync(physical, alias);
+    try {
+      const metaCwd = fs.realpathSync(physical);
+      const today = dateDir(0);
+      const file = writeRollout(today, 'rollout-sym-rev.jsonl', 'sess-sym-rev', metaCwd);
+
+      const sessions = realListLiveCodexSessions(() => [alias], sessionsRoot);
+
+      expect(sessions).toEqual([{ sessionId: 'sess-sym-rev', rolloutFile: file, cwd: metaCwd }]);
+    } finally {
+      fs.rmSync(physical, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back to raw string comparison when realpath throws (vanished paths)', () => {
+    // Neither path exists -> fs.realpathSync throws on both sides -> the raw
+    // strings must still be compared (and match here).
+    const today = dateDir(0);
+    const file = writeRollout(today, 'rollout-gone.jsonl', 'sess-gone', '/tmp/pxl-vanished-proj');
+
+    const sessions = realListLiveCodexSessions(() => ['/tmp/pxl-vanished-proj'], sessionsRoot);
+
+    expect(sessions).toEqual([
+      { sessionId: 'sess-gone', rolloutFile: file, cwd: '/tmp/pxl-vanished-proj' },
+    ]);
+  });
 });
 
 describe('AgentRuntime.startProcessScan: codex process-liveness scanning', () => {

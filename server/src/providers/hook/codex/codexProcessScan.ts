@@ -161,12 +161,28 @@ function listRecentRollouts(sessionsRoot: string): string[] {
   return files.map((f) => f.file);
 }
 
+/** Canonicalize a path FOR COMPARISON ONLY (Wave 5 FIX 9): `lsof -d cwd`
+ *  reports the PHYSICAL path while session_meta.cwd records whatever path
+ *  codex was launched from -- possibly a symlink form (live evidence:
+ *  ~/projects -> /Volumes/.../projects), so raw string equality silently
+ *  fails across the boundary. Falls back to the raw string when the path
+ *  can't be resolved (vanished directories). */
+function canonicalCwd(p: string): string {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return p;
+  }
+}
+
 /**
  * Enumerate live Codex sessions: running `codex` processes -> their working
- * directories -> the newest recent rollout whose session_meta cwd matches.
- * `listProcessCwds` defaults to the real ps+lsof enumeration and
- * `sessionsRoot` to ~/.codex/sessions; tests inject both so they never
- * depend on real processes or the real home directory.
+ * directories -> the newest recent rollout whose session_meta cwd matches
+ * (realpath-normalized comparison; the returned `cwd` keeps the session_meta
+ * form, which is what adoption/EXP already key on). `listProcessCwds`
+ * defaults to the real ps+lsof enumeration and `sessionsRoot` to
+ * ~/.codex/sessions; tests inject both so they never depend on real
+ * processes or the real home directory.
  */
 export function listLiveCodexSessions(
   listProcessCwds: () => string[] = listCodexProcessCwds,
@@ -183,20 +199,30 @@ export function listLiveCodexSessions(
   const rollouts = listRecentRollouts(sessionsRoot); // newest-first
   if (rollouts.length === 0) return [];
 
-  // Each rollout's meta is read at most once per scan, even when several
-  // process cwds walk the same list.
+  // Each rollout's meta is read (and each distinct path realpath'd) at most
+  // once per scan, even when several process cwds walk the same list.
   const metaCache = new Map<string, CodexSessionMeta | null>();
+  const canonCache = new Map<string, string>();
+  const canon = (p: string): string => {
+    let c = canonCache.get(p);
+    if (c === undefined) {
+      c = canonicalCwd(p);
+      canonCache.set(p, c);
+    }
+    return c;
+  };
   const sessions: LiveCodexSession[] = [];
   const seenFiles = new Set<string>();
 
   for (const cwd of new Set(cwds)) {
+    const target = canon(cwd);
     for (const file of rollouts) {
       let meta = metaCache.get(file);
       if (meta === undefined) {
         meta = readCodexSessionMeta(file);
         metaCache.set(file, meta);
       }
-      if (!meta || meta.cwd !== cwd) continue;
+      if (!meta || canon(meta.cwd) !== target) continue;
       // Newest rollout for this cwd (list is newest-first). Two processes in
       // the same cwd resolve to the same session -- dedupe by file.
       if (!seenFiles.has(file)) {
