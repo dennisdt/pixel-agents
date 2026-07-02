@@ -40,6 +40,7 @@ import {
   FILE_WATCHER_POLL_INTERVAL_MS,
   GLOBAL_SCAN_ACTIVE_MAX_AGE_MS,
   GLOBAL_SCAN_ACTIVE_MIN_SIZE,
+  NON_PRIMARY_STALE_TIMEOUT_MS,
   PROJECT_SCAN_INTERVAL_MS,
 } from './constants.js';
 import { seedContextUsage } from './contextUsage.js';
@@ -1624,6 +1625,14 @@ export function startStaleExternalAgentCheck(
     for (const [id, agent] of agents) {
       if (!agent.isExternal) continue;
 
+      // Hooks-only agents (Hermes) have no transcript file (jsonlFile === '').
+      // fs.statSync('') throws, which the catch below treats as "file
+      // deleted -> remove" -- reaping them within one check interval of
+      // adoption. Their lifecycle is owned by their own poller's
+      // reapEnded/inactivity check, which fires SessionEnd through the
+      // normal hook path; this scanner must leave them alone entirely.
+      if (!agent.jsonlFile) continue;
+
       // Non-primary-provider agents (Codex, Hermes, ...) never get a
       // SessionEnd hook, so hooks mode can't clean them up the way it does
       // Claude (the primary provider). Their mtime-based staleness check
@@ -1640,7 +1649,10 @@ export function startStaleExternalAgentCheck(
         if (hooksEnabledRef?.current && isNonPrimaryProviderAgent) {
           // Hooks-mode, non-primary provider: mtime staleness is the only
           // signal -- e.g. a Codex rollout file is never deleted on session end.
-          if (Date.now() - stat.mtimeMs <= EXTERNAL_ACTIVE_THRESHOLD_MS) continue;
+          // Uses a longer window than EXTERNAL_ACTIVE_THRESHOLD_MS (which is
+          // tuned for scanners paired with process-liveness): a rollout file
+          // can go quiet between turns while the session is still alive.
+          if (Date.now() - stat.mtimeMs <= NON_PRIMARY_STALE_TIMEOUT_MS) continue;
         } else {
           // Heuristic mode: only despawn if the JSONL file has been deleted
           // from disk. Inactive external agents stay alive so they can resume

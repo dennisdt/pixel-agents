@@ -9,6 +9,7 @@ import { AgentStateStore } from '../src/agentStateStore.js';
 import {
   EXTERNAL_ACTIVE_THRESHOLD_MS,
   EXTERNAL_STALE_CHECK_INTERVAL_MS,
+  NON_PRIMARY_STALE_TIMEOUT_MS,
 } from '../src/constants.js';
 import { DismissalTracker } from '../src/dismissalTracker.js';
 import {
@@ -407,7 +408,10 @@ describe('startStaleExternalAgentCheck: hooks-mode reaping gated by provider', (
     const claudeFile = path.join(tmpDir, 'claude-sess.jsonl');
     fs.writeFileSync(codexFile, '');
     fs.writeFileSync(claudeFile, '');
-    const staleMtime = new Date(Date.now() - EXTERNAL_ACTIVE_THRESHOLD_MS - 60_000);
+    // Non-primary providers get NON_PRIMARY_STALE_TIMEOUT_MS (30 min), not
+    // EXTERNAL_ACTIVE_THRESHOLD_MS (2 min, tuned for process-liveness-paired
+    // scanners) -- a rollout file can go quiet between turns while still live.
+    const staleMtime = new Date(Date.now() - NON_PRIMARY_STALE_TIMEOUT_MS - 60_000);
     fs.utimesSync(codexFile, staleMtime, staleMtime);
     fs.utimesSync(claudeFile, staleMtime, staleMtime);
 
@@ -429,6 +433,112 @@ describe('startStaleExternalAgentCheck: hooks-mode reaping gated by provider', (
     expect(store.has(10)).toBe(false);
     // Claude keeps the hooks-mode skip -- SessionEnd is its cleanup path.
     expect(store.has(11)).toBe(true);
+  });
+
+  it('does NOT reap a non-primary agent past EXTERNAL_ACTIVE_THRESHOLD_MS but under NON_PRIMARY_STALE_TIMEOUT_MS', () => {
+    // Guards against silently reverting to the tighter 2-minute threshold:
+    // a Codex rollout file idle for e.g. 3 minutes is still a live session.
+    const codexFile = path.join(tmpDir, 'codex-sess-idle.jsonl');
+    fs.writeFileSync(codexFile, '');
+    const idleMtime = new Date(Date.now() - EXTERNAL_ACTIVE_THRESHOLD_MS - 60_000);
+    fs.utimesSync(codexFile, idleMtime, idleMtime);
+
+    store.set(
+      12,
+      createTestAgent({ id: 12, isExternal: true, providerId: 'codex', jsonlFile: codexFile }),
+    );
+
+    startStaleExternalAgentCheck(store, knownJsonlFiles, { current: true });
+    vi.advanceTimersByTime(EXTERNAL_STALE_CHECK_INTERVAL_MS);
+
+    expect(removedIds).toEqual([]);
+    expect(store.has(12)).toBe(true);
+  });
+
+  it('Finding A: hooks-only agent (providerId hermes, jsonlFile "") survives the stale check', () => {
+    store.set(
+      20,
+      createTestAgent({
+        id: 20,
+        isExternal: true,
+        providerId: 'hermes',
+        jsonlFile: '',
+        hooksOnly: true,
+      }),
+    );
+
+    startStaleExternalAgentCheck(store, knownJsonlFiles, { current: true });
+    vi.advanceTimersByTime(EXTERNAL_STALE_CHECK_INTERVAL_MS);
+
+    // fs.statSync('') would throw, and without the jsonlFile guard the catch
+    // block treats that as "file deleted -> remove". Hooks-only agents'
+    // lifecycle is owned by their provider's own poller (reapEnded/inactivity
+    // -> SessionEnd), not this scanner.
+    expect(removedIds).toEqual([]);
+    expect(store.has(20)).toBe(true);
+  });
+});
+
+describe('Finding B: stale-reaped sessions do not become black holes', () => {
+  let store: AgentStateStore;
+  let runtime: AgentRuntime;
+  let tmpDir: string;
+
+  beforeEach(() => {
+    store = new AgentStateStore();
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-stale-reap-test-'));
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    runtime.dispose();
+    vi.useRealTimers();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('a later SessionStart+confirmation for the same session id re-adopts after a stale reap', () => {
+    runtime = new AgentRuntime(store, [claudeProvider, codexProvider]);
+
+    const transcriptPath = path.join(tmpDir, 'codex-sess.jsonl');
+    fs.writeFileSync(transcriptPath, '');
+    const staleMtime = new Date(Date.now() - NON_PRIMARY_STALE_TIMEOUT_MS - 60_000);
+    fs.utimesSync(transcriptPath, staleMtime, staleMtime);
+
+    // Adopt via the hooks pending->confirm flow (SessionStart, then Stop).
+    runtime.handleHookEvent('codex', {
+      hook_event_name: 'SessionStart',
+      session_id: 'codex-reap-sess',
+      source: 'startup',
+      transcript_path: transcriptPath,
+      cwd: '/tmp/pxl-finding-b-project',
+    });
+    runtime.handleHookEvent('codex', { hook_event_name: 'Stop', session_id: 'codex-reap-sess' });
+    expect(store.size).toBe(1);
+    const firstAgentId = [...store.keys()][0];
+
+    // Stale-reap it (mtime older than NON_PRIMARY_STALE_TIMEOUT_MS, hooks enabled).
+    runtime.startStaleCheck();
+    vi.advanceTimersByTime(EXTERNAL_STALE_CHECK_INTERVAL_MS);
+    expect(store.has(firstAgentId)).toBe(false);
+
+    // Without unregistering the session mapping at removal time, this second
+    // SessionStart would resolve to the dead agent id, find no agent in the
+    // store, and return early treating the session as "known" -- the Stop
+    // confirmation would then also resolve to the dead id and be dropped,
+    // never re-creating the character.
+    runtime.handleHookEvent('codex', {
+      hook_event_name: 'SessionStart',
+      session_id: 'codex-reap-sess',
+      source: 'startup',
+      transcript_path: transcriptPath,
+      cwd: '/tmp/pxl-finding-b-project',
+    });
+    runtime.handleHookEvent('codex', { hook_event_name: 'Stop', session_id: 'codex-reap-sess' });
+
+    expect(store.size).toBe(1);
+    const secondAgentId = [...store.keys()][0];
+    expect(secondAgentId).not.toBe(firstAgentId);
+    expect(store.get(secondAgentId)?.jsonlFile).toBe(transcriptPath);
   });
 });
 

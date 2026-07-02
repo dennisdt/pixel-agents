@@ -402,6 +402,17 @@ export class AgentRuntime {
     const agent = this.store.get(id);
     if (!agent) return;
 
+    // Unregister the session->agent mapping FIRST. Every removal path funnels
+    // through here (including fileWatcher.ts's stale-reap and orphaned-terminal
+    // scanners via agentRemovalCallback), and without this the session router
+    // keeps resolving the dead agent id forever: a later SessionStart for the
+    // same session id would see sessionRouter.resolve() return this id, find
+    // no agent in the store, and silently treat the session as "known" without
+    // re-adopting it (a black hole). Mirrors startProcessScan's
+    // unregister-then-remove pattern. Idempotent if already unregistered
+    // (e.g. removeTeammate/onSessionEnd call it explicitly before this).
+    this.unregisterAgent(agent.sessionId);
+
     // Stop JSONL poll timer
     const jpTimer = this.jsonlPollTimers.get(id);
     if (jpTimer) {

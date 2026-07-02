@@ -142,6 +142,76 @@ describe('codexHookInstaller', () => {
     expect(hooksAfterUninstall.hooks.PreToolUse[0].hooks[0].command).toBe('other-tool-hook');
   });
 
+  it('Finding D: replaces our group in place when a foreign group sits after ours (no duplicate table headers)', async () => {
+    // First install establishes our group at index 0 for PreToolUse (no
+    // existing groups yet).
+    await installHooks();
+    const hooksJsonPathStr = path.join(tmpBase, '.codex', 'hooks.json');
+    const tomlPath = path.join(tmpBase, '.codex', 'config.toml');
+    const ourKey = `${hooksJsonPathStr}:pre_tool_use:0:0`;
+    const tomlBeforeForeign = fs.readFileSync(tomlPath, 'utf-8');
+    expect(tomlBeforeForeign).toContain(`[hooks.state."${ourKey}"]`);
+
+    // Manually insert a foreign group AFTER ours, and trust it in config.toml
+    // -- reproducing another tool's installer running after ours.
+    const hooksFile = JSON.parse(fs.readFileSync(hooksJsonPathStr, 'utf-8')) as {
+      hooks: Record<
+        string,
+        Array<{
+          matcher?: string;
+          hooks: Array<{ type: string; command: string; timeout: number }>;
+        }>
+      >;
+    };
+    hooksFile.hooks.PreToolUse.push({
+      matcher: '',
+      hooks: [{ type: 'command', command: 'other-tool-hook', timeout: 3 }],
+    });
+    fs.writeFileSync(hooksJsonPathStr, JSON.stringify(hooksFile, null, 2) + '\n');
+
+    const foreignKey = `${hooksJsonPathStr}:pre_tool_use:1:0`;
+    const foreignTrustSection = `[hooks.state."${foreignKey}"]\ntrusted_hash = "sha256:foreign-deadbeef"\n`;
+    fs.writeFileSync(tomlPath, `${tomlBeforeForeign}\n${foreignTrustSection}`);
+
+    // Reinstall -- our group must be replaced IN PLACE (index 0) so the
+    // foreign group's index (1) never shifts and its trust section stays valid.
+    await installHooks();
+
+    const tomlAfter = fs.readFileSync(tomlPath, 'utf-8');
+    const headers = [...tomlAfter.matchAll(/^\[hooks\.state\."(.*)"\]$/gm)].map((m) => m[1]);
+    expect(new Set(headers).size).toBe(headers.length); // every header appears exactly once
+    expect(tomlAfter).toContain(foreignTrustSection.trim()); // foreign entry intact
+    expect(tomlAfter).toContain(`[hooks.state."${ourKey}"]`); // our key stable at index 0
+
+    const hooksAfter = JSON.parse(fs.readFileSync(hooksJsonPathStr, 'utf-8')) as {
+      hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+    };
+    expect(hooksAfter.hooks.PreToolUse).toHaveLength(2);
+    expect(hooksAfter.hooks.PreToolUse[0].hooks[0].command).toMatch(/ codex$/); // ours stayed at 0
+    expect(hooksAfter.hooks.PreToolUse[1].hooks[0].command).toBe('other-tool-hook'); // foreign stayed at 1
+  });
+
+  it('Finding D: dedupes an orphaned our-key when our group is absent from hooks.json (append case)', async () => {
+    const hooksJsonPathStr = path.join(tmpBase, '.codex', 'hooks.json');
+    const tomlPath = path.join(tmpBase, '.codex', 'config.toml');
+    // Our group will land at index 0 on a fresh install (no existing groups).
+    // Simulate a stale/orphaned trust section already sitting at that exact
+    // key (e.g. left behind by a manual hooks.json edit that dropped our
+    // group without cleaning up config.toml).
+    const orphanedKey = `${hooksJsonPathStr}:pre_tool_use:0:0`;
+    const orphanedSection = `[hooks.state."${orphanedKey}"]\ntrusted_hash = "sha256:orphan-deadbeef"\n`;
+    fs.writeFileSync(tomlPath, `model = "gpt-5.2-codex"\n\n${orphanedSection}`);
+    expect(fs.existsSync(hooksJsonPathStr)).toBe(false); // our group truly absent
+
+    await installHooks();
+
+    const toml = fs.readFileSync(tomlPath, 'utf-8');
+    const occurrences = toml.split(`[hooks.state."${orphanedKey}"]`).length - 1;
+    expect(occurrences).toBe(1); // exactly one section for the written key
+    expect(toml).not.toContain('orphan-deadbeef'); // stale hash replaced, not duplicated
+    expect(await areHooksInstalled()).toBe(true);
+  });
+
   it('migrates a legacy no-argv install (the current live state)', async () => {
     // Old install: same script, no argv -> posted Codex events to /claude.
     fs.writeFileSync(

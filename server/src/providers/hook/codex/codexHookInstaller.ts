@@ -187,15 +187,34 @@ export async function installHooks(): Promise<void> {
   const trustEntries: Array<{ key: string; hash: string }> = [];
 
   for (const event of CODEX_HOOK_EVENTS) {
-    const groups = (hooks[event] ?? []).filter((g) => !g.hooks.some(isOurs));
+    const existingGroups = hooks[event] ?? [];
+    // Preserve our original index when we already have a group for this
+    // event (replace IN PLACE) instead of removing it and appending a fresh
+    // one at the end. Appending at the end shifts the index of every foreign
+    // group that used to sit after ours, so the trust key we compute for the
+    // new group (built purely from event+index, not content) can collide
+    // with a still-present foreign `[hooks.state."..."]` section that hasn't
+    // moved in config.toml -- duplicate TOML tables are a hard parse error
+    // for Codex's Rust TOML parser. Appending is only safe when we don't
+    // already occupy a slot for this event.
+    const ourIndex = existingGroups.findIndex((g) => g.hooks.some(isOurs));
     const matcherless = CODEX_MATCHERLESS_EVENTS.has(event);
     const group: CodexMatcherGroup = {
       ...(matcherless ? {} : { matcher: '' }),
       hooks: [{ type: 'command', command, timeout: CODEX_HOOK_TIMEOUT_SEC }],
     };
-    groups.push(group);
+
+    const groups = existingGroups.filter((g) => !g.hooks.some(isOurs));
+    let groupIndex: number;
+    if (ourIndex !== -1) {
+      groups.splice(ourIndex, 0, group);
+      groupIndex = ourIndex;
+    } else {
+      groups.push(group);
+      groupIndex = groups.length - 1;
+    }
     hooks[event] = groups;
-    const groupIndex = groups.length - 1;
+
     trustEntries.push({
       key: trustKey(event, groupIndex, 0),
       hash: trustHash(event, matcherless ? null : '', command, CODEX_HOOK_TIMEOUT_SEC),
@@ -209,7 +228,14 @@ export async function installHooks(): Promise<void> {
   atomicWrite(hooksJsonPath(), JSON.stringify({ ...file, hooks }, null, 2) + '\n');
   try {
     const toml = fs.existsSync(configTomlPath()) ? fs.readFileSync(configTomlPath(), 'utf-8') : '';
-    let next = removeTrustKeys(toml, staleTrustKeys).trimEnd();
+    // Dedupe: remove both the previously-known stale "ours" keys AND the
+    // exact keys we're about to (re)write. The latter catches orphaned
+    // sections left behind by manual/partial hooks.json edits -- no matching
+    // group exists to identify them as "ours" via staleTrustKeys, but if a
+    // stale section already sits at the key we're about to write, leaving it
+    // in place would produce a duplicate `[hooks.state."..."]` header.
+    const removeKeys = new Set([...staleTrustKeys, ...trustEntries.map((e) => e.key)]);
+    let next = removeTrustKeys(toml, removeKeys).trimEnd();
     for (const { key, hash } of trustEntries) {
       next += `\n\n[hooks.state."${escapeTomlKey(key)}"]\ntrusted_hash = "${hash}"`;
     }
