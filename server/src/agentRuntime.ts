@@ -21,7 +21,7 @@ import {
   PROCESS_SCAN_INTERVAL_MS,
   PROCESS_SCAN_REMOVE_STRIKES,
 } from './constants.js';
-import { creditHistoricalSession } from './directoryStats.js';
+import { creditDirectoryTokens, creditHistoricalSession } from './directoryStats.js';
 import { DismissalTracker } from './dismissalTracker.js';
 import {
   adoptExternalSessionFromHook,
@@ -51,6 +51,7 @@ import {
   listLiveCodexSessions,
   type LiveCodexSession,
 } from './providers/hook/codex/codexProcessScan.js';
+import { CodexTokenReader } from './providers/hook/codex/codexTokenReader.js';
 import { SessionRouter } from './sessionRouter.js';
 import { SubagentWatch } from './subagentWatch.js';
 import { cancelPermissionTimer, cancelWaitingTimer } from './timerManager.js';
@@ -95,6 +96,9 @@ export class AgentRuntime {
    *  tick. Threaded into startStaleExternalAgentCheck so it never reaps a live
    *  session on mtime alone (Codex has no SessionEnd hook -- see startProcessScan). */
   readonly liveCodexJsonlFiles = new Set<string>();
+  /** Incremental output-token reader for Codex rollout files (directory EXP).
+   *  Polled from the process-scan tick for every codex agent with a jsonlFile. */
+  private readonly codexTokenReader = new CodexTokenReader();
 
   // Configuration refs (mutable, shared with scanners)
   readonly watchAllSessions = { current: false };
@@ -191,6 +195,7 @@ export class AgentRuntime {
         providerId,
         personaKey,
         folderHint,
+        expBucket,
       ) => {
         const projectDir = transcriptPath ? path.dirname(transcriptPath) : cwd;
         // Teammate session of a tracked lead? Attach it as a teammate character
@@ -267,6 +272,7 @@ export class AgentRuntime {
           (agent) => this.handleAgentCreated(agent),
           personaKey,
           folderHint,
+          expBucket,
         );
       },
       onSessionClear: (agentId, newSessionId, newTranscriptPath) => {
@@ -449,6 +455,10 @@ export class AgentRuntime {
     cancelWaitingTimer(id, this.waitingTimers);
     cancelPermissionTimer(id, this.permissionTimers);
 
+    // Drop the codex token-reader state for this file (no-op for other
+    // providers -- only codex rollout files ever enter the reader's map).
+    if (agent.jsonlFile) this.codexTokenReader.forget(agent.jsonlFile);
+
     // Notify adapter before deleting from store
     this.lifecycleCallbacks.onAgentRemoved?.(id, agent);
 
@@ -606,6 +616,11 @@ export class AgentRuntime {
     if (this.processScanTimer) return;
 
     const tick = (): void => {
+      // Codex output-token EXP runs BEFORE the watchAllSessions gate: it serves
+      // every codex agent with a rollout file, and hook-adopted codex agents
+      // exist (and accrue tokens) even when adopt-all-sessions is off.
+      this.creditCodexOutputTokens();
+
       if (!this.watchAllSessions.current) {
         // Scan disabled -- forget any previously-live Codex files so
         // startStaleExternalAgentCheck's live-set skip doesn't protect them
@@ -725,6 +740,35 @@ export class AgentRuntime {
 
     tick();
     this.processScanTimer = setInterval(tick, PROCESS_SCAN_INTERVAL_MS);
+  }
+
+  /**
+   * Output-token EXP for codex agents: poll each agent's rollout file for new
+   * cumulative `token_count` records and credit positive deltas to the agent's
+   * real cwd (same directory-keyed leveling as Claude). Runs on the process-scan
+   * tick for BOTH hook-adopted and scan-adopted codex agents. Never throws.
+   */
+  private creditCodexOutputTokens(): void {
+    for (const agent of this.store.values()) {
+      if (agent.providerId !== 'codex' || !agent.jsonlFile || !agent.cwd) continue;
+      try {
+        const delta = this.codexTokenReader.poll(agent.jsonlFile);
+        if (delta <= 0) continue;
+        agent.outputTokens += delta;
+        const totalExp = creditDirectoryTokens(agent.cwd, delta);
+        this.store.broadcast({ type: 'directoryExp', directory: agent.cwd, totalExp });
+        // Unlike hermes (whose poller has no agent id), the runtime knows the
+        // agent here -- mirror transcriptParser's per-agent usage broadcast.
+        this.store.broadcast({
+          type: 'agentTokenUsage',
+          id: agent.id,
+          inputTokens: agent.inputTokens,
+          outputTokens: agent.outputTokens,
+        });
+      } catch {
+        /* never throw out of the scan tick */
+      }
+    }
   }
 
   // ── Restore persisted external agents (standalone) ──

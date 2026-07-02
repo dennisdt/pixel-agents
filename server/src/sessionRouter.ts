@@ -13,6 +13,10 @@ export interface PendingExternalSession {
   /** Display-name fallback for cwd-less sessions, carried through from the raw
    *  envelope's `folder_hint` field (Hermes webui: cwd NULL, hint 'hermes-webui'). */
   folderHint?: string;
+  /** Directory-EXP bucket from the raw envelope's `exp_bucket` field (Hermes:
+   *  'hermes-<source>'). Stamped on the agent as its cwd so the webview's
+   *  cwd-keyed leveling works against the stable persona bucket. */
+  expBucket?: string;
 }
 
 /** An event waiting to be dispatched once its agent registers. */

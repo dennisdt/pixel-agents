@@ -1092,6 +1092,10 @@ export function adoptExternalSessionFromHook(
   /** Display-name fallback for cwd-less hooks-only sessions (the Hermes webui
    *  runs with cwd NULL, so there is no directory basename to name the agent after). */
   folderHint?: string,
+  /** Directory-EXP bucket for hooks-only providers (Hermes: 'hermes-<source>').
+   *  Stamped on the agent as its cwd — the webview keys character levels by
+   *  agent cwd, and hermes EXP accrues to stable persona buckets, not raw cwds. */
+  expBucket?: string,
 ): void {
   if (transcriptPath) {
     // File-based provider (Claude, Codex): adopt with JSONL file watching
@@ -1172,6 +1176,10 @@ export function adoptExternalSessionFromHook(
       lastDataAt: Date.now(),
       linesProcessed: 0,
       seenUnknownRecordTypes: new Set(),
+      // EXP bucket wins over the raw cwd: the webview levels characters by
+      // agent.cwd, and hooks-only providers (Hermes) accrue EXP to stable
+      // persona buckets rather than per-directory totals.
+      cwd: expBucket ?? (cwd || undefined),
       folderName,
       providerId,
       personaKey,

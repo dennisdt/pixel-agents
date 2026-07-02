@@ -579,6 +579,7 @@ describe('HookEventHandler', () => {
       'claude',
       undefined,
       undefined, // folderHint — only set for cwd-less sessions
+      undefined, // expBucket — only set by hermes
     );
     // Stop was re-processed after agent creation
     const agent = agents.get(2);
@@ -610,6 +611,7 @@ describe('HookEventHandler', () => {
       'claude',
       'cli:/projects/test',
       undefined, // folderHint — only set for cwd-less sessions
+      undefined, // expBucket — only set by hermes
     );
   });
 
@@ -792,6 +794,7 @@ describe('HookEventHandler', () => {
       'claude',
       undefined,
       undefined, // folderHint — only set for cwd-less sessions
+      undefined, // expBucket — only set by hermes
     );
   });
 

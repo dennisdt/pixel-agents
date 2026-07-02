@@ -260,6 +260,11 @@ async function main(): Promise<void> {
           return undefined;
         },
         reattachSession: (agentId, sessionId) => runtime.reattachSession(agentId, sessionId),
+        // Output-token EXP: the poller credits deltas to persona buckets via
+        // directoryStats; this pushes the new total to the webview so hermes
+        // characters level live (they carry the bucket as their cwd).
+        onDirectoryExp: (directory, totalExp) =>
+          store.broadcast({ type: 'directoryExp', directory, totalExp }),
       });
       hermesPoller.start();
       console.log('[Pixel Agents] Hermes poller started');

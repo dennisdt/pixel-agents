@@ -37,7 +37,9 @@ export interface SessionLifecycleCallbacks {
    *  personaKey (Hermes) is the raw envelope's `persona_key`, for stamping the new
    *  agent so a future session-id rotation can reattach instead of respawning.
    *  folderHint (Hermes) is the raw envelope's `folder_hint`, the display-name
-   *  fallback for cwd-less sessions (the webui runs with cwd NULL). */
+   *  fallback for cwd-less sessions (the webui runs with cwd NULL).
+   *  expBucket (Hermes) is the raw envelope's `exp_bucket`, the stable
+   *  directory-EXP bucket stamped on the agent as its cwd. */
   onExternalSessionDetected?: (
     sessionId: string,
     transcriptPath: string | undefined,
@@ -45,6 +47,7 @@ export interface SessionLifecycleCallbacks {
     providerId: string,
     personaKey?: string,
     folderHint?: string,
+    expBucket?: string,
   ) => void;
   /** Called when /clear is detected via hooks (SessionEnd reason=clear + SessionStart source=clear). */
   onSessionClear?: (
@@ -184,6 +187,7 @@ export class HookEventHandler {
       // persona-continuity providers (Hermes), same treatment as transcript_path/cwd.
       const personaKey = typeof event.persona_key === 'string' ? event.persona_key : undefined;
       const folderHint = typeof event.folder_hint === 'string' ? event.folder_hint : undefined;
+      const expBucket = typeof event.exp_bucket === 'string' ? event.exp_bucket : undefined;
       const tracked = this.isTrackedSession(transcriptPath, cwd);
       if (debug && tracked)
         console.log(`[Pixel Agents] Hook: SessionStart(source=${source}, session=${sid}...)`);
@@ -269,6 +273,7 @@ export class HookEventHandler {
           cwd: cwd ?? '',
           personaKey,
           folderHint,
+          expBucket,
         });
       } else {
         if (debug && tracked)
@@ -304,6 +309,7 @@ export class HookEventHandler {
         this.provider.id,
         pending.personaKey,
         pending.folderHint,
+        pending.expBucket,
       );
       // Re-process this event now that the agent exists
       this.handleEvent(_providerId, event);

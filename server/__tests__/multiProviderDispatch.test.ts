@@ -417,6 +417,28 @@ describe('cwd-less hooks-only adoption (hermes webui)', () => {
     expect(agent.personaKey).toBe('webui:');
   });
 
+  it('stamps agent.cwd with the exp_bucket so the webview levels hermes agents by persona bucket', () => {
+    // The webview keys character levels by the agent's cwd (agentCwds ->
+    // directoryExp map). Hermes EXP accrues to stable persona buckets
+    // ('hermes-webui'/'hermes-cli'), so the agent's cwd must BE the bucket --
+    // not the raw session cwd -- for leveling to work with zero webview changes.
+    runtime = new AgentRuntime(store, [claudeProvider, hermesProvider]);
+
+    runtime.handleHookEvent('hermes', {
+      hook_event_name: 'SessionStart',
+      session_id: 'webui-exp-sess',
+      source: 'external',
+      persona_key: 'webui:',
+      folder_hint: 'hermes-webui',
+      exp_bucket: 'hermes-webui',
+    });
+    runtime.handleHookEvent('hermes', { hook_event_name: 'Stop', session_id: 'webui-exp-sess' });
+
+    expect(store.size).toBe(1);
+    const agent = [...store.values()][0];
+    expect(agent.cwd).toBe('hermes-webui');
+  });
+
   it('claude (usesTranscriptFile) is unchanged: SessionStart with neither transcript nor cwd is NOT adoptable', () => {
     runtime = new AgentRuntime(store, [claudeProvider, hermesProvider]);
 

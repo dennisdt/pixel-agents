@@ -41,6 +41,7 @@ const { readCodexSessionMeta, listLiveCodexSessions: realListLiveCodexSessions }
 const { AgentRuntime } = await import('../src/agentRuntime.js');
 const { AgentStateStore } = await import('../src/agentStateStore.js');
 const { PROCESS_SCAN_INTERVAL_MS } = await import('../src/constants.js');
+const { __resetDirectoryStatsForTest, getDirectoryExp } = await import('../src/directoryStats.js');
 const { setHookProvider } = await import('../src/fileWatcher.js');
 
 describe('readCodexSessionMeta', () => {
@@ -224,5 +225,110 @@ describe('AgentRuntime.startProcessScan: codex process-liveness scanning', () =>
     runtime.startProcessScan();
 
     expect(store.size).toBe(0);
+  });
+});
+
+describe('AgentRuntime.startProcessScan: codex output-token EXP', () => {
+  let store: InstanceType<typeof AgentStateStore>;
+  let runtime: InstanceType<typeof AgentRuntime>;
+  let tmpDir: string;
+  let prevHome: string | undefined;
+  let broadcasts: Array<Record<string, unknown>>;
+
+  function tokenLine(outputTokens: number): string {
+    return JSON.stringify({
+      timestamp: '2026-07-02T00:00:00.000Z',
+      type: 'token_count',
+      info: { total_token_usage: { input_tokens: 10, output_tokens: outputTokens } },
+    });
+  }
+
+  beforeEach(() => {
+    setHookProvider(claudeProvider as HookProvider);
+    prevHome = process.env.HOME;
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-codex-exp-'));
+    process.env.HOME = tmpDir; // debounced stats save must never touch the real home
+    __resetDirectoryStatsForTest();
+    store = new AgentStateStore();
+    broadcasts = [];
+    store.on('broadcast', (msg) => broadcasts.push(msg));
+    mockListLiveCodexSessions.mockReset();
+    mockListLiveCodexSessions.mockReturnValue([]);
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    runtime.dispose();
+    vi.useRealTimers();
+    __resetDirectoryStatsForTest();
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('credits appended token_count deltas to the agent cwd and broadcasts directoryExp + agentTokenUsage', () => {
+    const rolloutFile = path.join(tmpDir, 'rollout-exp.jsonl');
+    const cwd = path.join(tmpDir, 'proj');
+    fs.writeFileSync(
+      rolloutFile,
+      `${JSON.stringify({ type: 'session_meta', payload: { session_id: 'codex-exp-1', cwd } })}\n`,
+    );
+
+    runtime = new AgentRuntime(store, [claudeProvider as HookProvider, codexProvider]);
+    runtime.watchAllSessions.current = true;
+    mockListLiveCodexSessions.mockReturnValue([{ sessionId: 'codex-exp-1', rolloutFile, cwd }]);
+
+    runtime.startProcessScan(); // tick 1: adopts the agent
+    expect(store.size).toBe(1);
+    const agent = [...store.values()][0];
+    expect(agent.cwd).toBe(cwd);
+
+    vi.advanceTimersByTime(PROCESS_SCAN_INTERVAL_MS); // tick 2: reader baselines existing content
+
+    fs.appendFileSync(rolloutFile, `${tokenLine(546)}\n`);
+    vi.advanceTimersByTime(PROCESS_SCAN_INTERVAL_MS); // tick 3: credits the 546 delta
+
+    expect(getDirectoryExp(cwd)).toBe(546);
+    expect(agent.outputTokens).toBe(546);
+    expect(broadcasts).toContainEqual({ type: 'directoryExp', directory: cwd, totalExp: 546 });
+    expect(broadcasts).toContainEqual({
+      type: 'agentTokenUsage',
+      id: agent.id,
+      inputTokens: agent.inputTokens,
+      outputTokens: 546,
+    });
+
+    // Cumulative counter grows 546 -> 555: only the 9-token delta credits.
+    fs.appendFileSync(rolloutFile, `${tokenLine(555)}\n`);
+    vi.advanceTimersByTime(PROCESS_SCAN_INTERVAL_MS); // tick 4
+    expect(getDirectoryExp(cwd)).toBe(555);
+    expect(agent.outputTokens).toBe(555);
+  });
+
+  it('accrues EXP for a hook-adopted codex agent even when watchAllSessions is off', () => {
+    const rolloutFile = path.join(tmpDir, 'rollout-hook.jsonl');
+    const cwd = path.join(tmpDir, 'proj-hook');
+    fs.writeFileSync(
+      rolloutFile,
+      `${JSON.stringify({ type: 'session_meta', payload: { session_id: 'codex-hook-1', cwd } })}\n`,
+    );
+
+    runtime = new AgentRuntime(store, [claudeProvider as HookProvider, codexProvider]);
+    // watchAllSessions stays OFF: the agent arrives via hooks, not the scan.
+    runtime.handleHookEvent('codex', {
+      hook_event_name: 'SessionStart',
+      session_id: 'codex-hook-1',
+      source: 'startup',
+      transcript_path: rolloutFile,
+      cwd,
+    });
+    runtime.handleHookEvent('codex', { hook_event_name: 'Stop', session_id: 'codex-hook-1' });
+    expect(store.size).toBe(1);
+
+    runtime.startProcessScan(); // tick 1: baseline (adoption scan itself is gated off)
+    fs.appendFileSync(rolloutFile, `${tokenLine(42)}\n`);
+    vi.advanceTimersByTime(PROCESS_SCAN_INTERVAL_MS); // tick 2: credits
+
+    expect(getDirectoryExp(cwd)).toBe(42);
   });
 });

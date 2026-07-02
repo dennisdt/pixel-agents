@@ -5,6 +5,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { __resetDirectoryStatsForTest, getDirectoryExp } from '../src/directoryStats.js';
 import { HERMES_INACTIVITY_TIMEOUT_MS } from '../src/providers/hook/hermes/constants.js';
 import { hermesProvider } from '../src/providers/hook/hermes/hermes.js';
 import type { MessageRow } from '../src/providers/hook/hermes/hermesPoller.js';
@@ -47,7 +48,8 @@ function makeDb(p: string): DatabaseSync {
   d.exec(`
     CREATE TABLE sessions (
       id TEXT PRIMARY KEY, source TEXT NOT NULL, cwd TEXT,
-      started_at REAL NOT NULL, ended_at REAL, end_reason TEXT
+      started_at REAL NOT NULL, ended_at REAL, end_reason TEXT,
+      output_tokens INTEGER
     );
     CREATE TABLE messages (
       id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
@@ -289,6 +291,156 @@ describe('HermesPoller', () => {
     poller.tick();
     const start = events.find((e) => e.envelope.hook_event_name === 'SessionStart');
     expect(start?.envelope.folder_hint).toBeUndefined();
+  });
+
+  // exp_bucket keys directory-scoped EXP for hermes agents: always the stable
+  // persona bucket ('hermes-<source>'), never the raw cwd, so leveling survives
+  // session-id rotation and cwd churn.
+  it('includes exp_bucket hermes-<source> on every SessionStart envelope', () => {
+    insertSession('s_web', 'webui', null);
+    insertMessage('s_web', 'user');
+    insertSession('s_cli', 'cli', '/proj/a');
+    insertMessage('s_cli', 'user');
+    poller.tick();
+    const starts = events.filter((e) => e.envelope.hook_event_name === 'SessionStart');
+    const web = starts.find((e) => e.envelope.session_id === 's_web');
+    const cli = starts.find((e) => e.envelope.session_id === 's_cli');
+    expect(web?.envelope.exp_bucket).toBe('hermes-webui');
+    expect(cli?.envelope.exp_bucket).toBe('hermes-cli');
+  });
+});
+
+// Output-token EXP: sessions.output_tokens is CUMULATIVE per session. The
+// poller tracks the last-seen value per known session (piggybacking reapEnded's
+// per-session query) and credits positive deltas to the stable persona bucket
+// via directoryStats. HOME is redirected so the debounced stats save never
+// touches the real ~/.pixel-agents.
+describe('HermesPoller: output-token EXP (persona buckets)', () => {
+  let prevHome: string | undefined;
+  let expEvents: Array<{ directory: string; totalExp: number }>;
+  let poller: HermesPoller;
+
+  beforeEach(() => {
+    prevHome = process.env.HOME;
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-hermes-exp-'));
+    process.env.HOME = tmpDir;
+    __resetDirectoryStatsForTest();
+    dbPath = path.join(tmpDir, 'state.db');
+    db = makeDb(dbPath);
+    events = [];
+    expEvents = [];
+    poller = new HermesPoller({
+      dbPath,
+      onEvent: (providerId, envelope) => events.push({ providerId, envelope }),
+      resolvePersonaAgent: () => undefined,
+      reattachSession: () => {},
+      onDirectoryExp: (directory, totalExp) => expEvents.push({ directory, totalExp }),
+    });
+  });
+
+  afterEach(() => {
+    poller.stop();
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    __resetDirectoryStatsForTest();
+    db.close();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function setOutputTokens(sessionId: string, tokens: number): void {
+    db.prepare('UPDATE sessions SET output_tokens = ? WHERE id = ?').run(tokens, sessionId);
+  }
+
+  it('credits a positive output_tokens delta to the persona bucket exactly once', () => {
+    insertSession('s_web', 'webui', null);
+    insertMessage('s_web', 'user');
+    setOutputTokens('s_web', 100);
+
+    poller.tick(); // bootstrap: announce s_web
+    poller.tick(); // first reapEnded pass: baseline 100, no credit
+    expect(getDirectoryExp('hermes-webui')).toBe(0);
+    expect(expEvents).toEqual([]);
+
+    setOutputTokens('s_web', 250);
+    poller.tick(); // delta 150 -> credit
+    expect(getDirectoryExp('hermes-webui')).toBe(150);
+    expect(expEvents).toEqual([{ directory: 'hermes-webui', totalExp: 150 }]);
+  });
+
+  it('does not credit unchanged counters, and never credits a backward reset', () => {
+    insertSession('s_web', 'webui', null);
+    insertMessage('s_web', 'user');
+    setOutputTokens('s_web', 100);
+
+    poller.tick(); // bootstrap
+    poller.tick(); // baseline 100
+    poller.tick(); // unchanged -> no credit
+    expect(getDirectoryExp('hermes-webui')).toBe(0);
+    expect(expEvents).toEqual([]);
+
+    setOutputTokens('s_web', 40); // counter reset backward (e.g. session restart)
+    poller.tick(); // no negative credit; new baseline 40
+    expect(getDirectoryExp('hermes-webui')).toBe(0);
+    expect(expEvents).toEqual([]);
+
+    setOutputTokens('s_web', 60);
+    poller.tick(); // growth from the new baseline credits normally
+    expect(getDirectoryExp('hermes-webui')).toBe(20);
+    expect(expEvents).toEqual([{ directory: 'hermes-webui', totalExp: 20 }]);
+  });
+
+  it('tolerates a sessions schema without output_tokens (older hermes): no throw, reaping still works', () => {
+    // Older hermes DBs predate the output_tokens column. The extended query
+    // must fall back instead of throwing out of the tick forever.
+    const oldDbPath = path.join(tmpDir, 'old-state.db');
+    const oldDb = new DatabaseSync(oldDbPath);
+    oldDb.exec(`
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY, source TEXT NOT NULL, cwd TEXT,
+        started_at REAL NOT NULL, ended_at REAL, end_reason TEXT
+      );
+      CREATE TABLE messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+        role TEXT NOT NULL, content TEXT, tool_call_id TEXT, tool_calls TEXT,
+        tool_name TEXT, timestamp REAL NOT NULL, finish_reason TEXT
+      );
+    `);
+    oldDb
+      .prepare('INSERT INTO sessions (id, source, cwd, started_at) VALUES (?,?,?,?)')
+      .run('s_old_schema', 'cli', '/proj/a', NOW_S);
+    oldDb
+      .prepare('INSERT INTO messages (session_id, role, timestamp) VALUES (?,?,?)')
+      .run('s_old_schema', 'user', NOW_S);
+
+    const p = new HermesPoller({
+      dbPath: oldDbPath,
+      onEvent: (providerId, envelope) => events.push({ providerId, envelope }),
+      resolvePersonaAgent: () => undefined,
+      reattachSession: () => {},
+      onDirectoryExp: (directory, totalExp) => expEvents.push({ directory, totalExp }),
+    });
+
+    expect(() => {
+      p.tick(); // bootstrap
+      p.tick(); // reapEnded: extended query fails once, falls back
+      p.tick();
+    }).not.toThrow();
+    expect(expEvents).toEqual([]);
+
+    // ended_at reaping still functions on the fallback query
+    oldDb
+      .prepare('UPDATE sessions SET ended_at = ?, end_reason = ? WHERE id = ?')
+      .run(NOW_S + 10, 'user_exit', 's_old_schema');
+    p.tick();
+    expect(
+      events.some(
+        (e) =>
+          e.envelope.hook_event_name === 'SessionEnd' && e.envelope.session_id === 's_old_schema',
+      ),
+    ).toBe(true);
+
+    p.stop();
+    oldDb.close();
   });
 });
 

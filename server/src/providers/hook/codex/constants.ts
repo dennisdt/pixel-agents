@@ -43,3 +43,8 @@ export const CODEX_HOOK_TIMEOUT_SEC = 5;
  *  objects; this generous bound avoids truncating one while avoiding a full
  *  read of a potentially large rollout file. */
 export const CODEX_SESSION_META_READ_BYTES = 65_536; // 64KB
+
+// ── Output-token EXP (codexTokenReader.ts) ──────────────────
+/** `type` value of the rollout JSONL records carrying cumulative session token
+ *  usage: `{"type":"token_count","info":{"total_token_usage":{"output_tokens":N}}}`. */
+export const CODEX_TOKEN_COUNT_TYPE = 'token_count';

@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { execFileSync } from 'child_process';
 
+import { creditDirectoryTokens } from '../../../directoryStats.js';
 import {
   HERMES_ACTIVE_THRESHOLD_MS,
   HERMES_HOLDERS_CACHE_MS,
@@ -19,6 +20,12 @@ export interface HermesPollerOptions {
   resolvePersonaAgent: (personaKey: string) => number | undefined;
   /** Task 10: re-point an existing agent to a new session id. */
   reattachSession: (agentId: number, newSessionId: string) => void;
+  /** Called after an output-token delta is credited to a persona bucket via
+   *  directoryStats. Wire to a `directoryExp` broadcast so the webview levels
+   *  hermes characters live. (No `agentTokenUsage` counterpart: that message
+   *  is keyed by agent id, which the poller doesn't know — directoryExp is
+   *  what drives leveling.) */
+  onDirectoryExp?: (directory: string, totalExp: number) => void;
   /**
    * True when a process OTHER than this server holds the Hermes db open (e.g.
    * QuantBot/Hermes's own agent process) -- evidence that a live-flagged
@@ -97,8 +104,17 @@ export class HermesPoller {
   // `protected` (not `private`) so a test subclass can assert cursor position
   // around a simulated row-processing failure (see hermesPoller.test.ts).
   protected cursor = -1; // -1 = first tick pending
-  /** Sessions we've announced, with last-activity for inactivity reaping. */
-  private readonly known = new Map<string, { lastActivityMs: number }>();
+  /** Sessions we've announced: last-activity for inactivity reaping, the EXP
+   *  persona bucket, and the last-seen CUMULATIVE sessions.output_tokens
+   *  (null = baseline pending; the first observation never credits). */
+  private readonly known = new Map<
+    string,
+    { lastActivityMs: number; bucket: string; lastOutputTokens: number | null }
+  >();
+  /** False once the extended reapEnded query fails: older hermes DBs predate
+   *  the sessions.output_tokens column, and retrying the failing prepare every
+   *  tick would drop the connection forever (tick's outer catch). */
+  private hasOutputTokensColumn = true;
   /** Session ids confirmed alive by a foreign DB holder process at bootstrap
    *  (see `bootstrap()`). `reapEnded()` skips inactivity-reaping these while
    *  `hasForeignDbHolders()` still returns true. */
@@ -243,7 +259,11 @@ export class HermesPoller {
   }
 
   private announceSession(s: SessionRow): void {
-    this.known.set(s.id, { lastActivityMs: Date.now() });
+    this.known.set(s.id, {
+      lastActivityMs: Date.now(),
+      bucket: HERMES_PERSONA_BUCKET_PREFIX + s.source,
+      lastOutputTokens: null,
+    });
     // Persona continuity (Task 10): reattach to an existing character when the
     // persona (source+cwd) already has one; otherwise a fresh SessionStart.
     const existing = this.opts.resolvePersonaAgent(personaKey(s.source, s.cwd));
@@ -261,6 +281,10 @@ export class HermesPoller {
       // NULL): there is no directory basename to name the character after, so
       // adoption falls back to the stable persona identifier instead.
       folder_hint: s.cwd ? undefined : HERMES_PERSONA_BUCKET_PREFIX + s.source,
+      // EXP bucket: hermes EXP accrues to stable persona buckets (never the
+      // raw cwd), and the webview levels characters by their agent.cwd -- so
+      // adoption stamps this on the agent as its cwd.
+      exp_bucket: HERMES_PERSONA_BUCKET_PREFIX + s.source,
     });
   }
 
@@ -300,6 +324,33 @@ export class HermesPoller {
     }
   }
 
+  /** Per-session reapEnded query, extended with the CUMULATIVE output_tokens
+   *  counter for EXP crediting. Falls back to the legacy column set once if
+   *  the schema predates output_tokens (older hermes) -- without the fallback,
+   *  the failing prepare would throw out of every tick and reaping would stop. */
+  private readSessionEndRow(
+    db: DatabaseSync,
+    sessionId: string,
+  ):
+    | { ended_at: number | null; end_reason: string | null; output_tokens?: number | null }
+    | undefined {
+    if (this.hasOutputTokensColumn) {
+      try {
+        return db
+          .prepare('SELECT ended_at, end_reason, output_tokens FROM sessions WHERE id = ?')
+          .get(sessionId) as unknown as
+          | { ended_at: number | null; end_reason: string | null; output_tokens: number | null }
+          | undefined;
+      } catch {
+        this.hasOutputTokensColumn = false;
+      }
+    }
+    return db
+      .prepare('SELECT ended_at, end_reason FROM sessions WHERE id = ?')
+      .get(sessionId) as unknown as
+      { ended_at: number | null; end_reason: string | null } | undefined;
+  }
+
   /** SessionEnd for rows with ended_at set, plus inactivity timeout. */
   private reapEnded(db: DatabaseSync): void {
     if (this.known.size === 0) return;
@@ -317,10 +368,25 @@ export class HermesPoller {
       }
     }
     for (const [sessionId, meta] of this.known) {
-      const s = db
-        .prepare('SELECT ended_at, end_reason FROM sessions WHERE id = ?')
-        .get(sessionId) as unknown as
-        { ended_at: number | null; end_reason: string | null } | undefined;
+      const s = this.readSessionEndRow(db, sessionId);
+
+      // Output-token EXP: sessions.output_tokens is CUMULATIVE. First
+      // observation is a baseline (never credited); growth credits the delta
+      // to the persona bucket; a backward reset re-baselines without a
+      // negative credit. Runs before the reap decision so a final burst on a
+      // just-ended session still credits.
+      const tokens = s?.output_tokens;
+      if (typeof tokens === 'number' && Number.isFinite(tokens)) {
+        if (meta.lastOutputTokens === null || tokens < meta.lastOutputTokens) {
+          meta.lastOutputTokens = tokens;
+        } else if (tokens > meta.lastOutputTokens) {
+          const delta = tokens - meta.lastOutputTokens;
+          meta.lastOutputTokens = tokens;
+          const totalExp = creditDirectoryTokens(meta.bucket, delta);
+          this.opts.onDirectoryExp?.(meta.bucket, totalExp);
+        }
+      }
+
       const endedInDb = isSessionEnded(s);
       // Skip INACTIVITY-reap (not ended_at-reap -- an explicit ended_at still
       // ends it) for processBacked sessions while a foreign holder still
