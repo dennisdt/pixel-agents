@@ -175,7 +175,7 @@ export class AgentRuntime {
 
     // Wire hook lifecycle callbacks to shared agent operations, on every handler.
     const lifecycleCallbacks: SessionLifecycleCallbacks = {
-      onExternalSessionDetected: (sessionId, transcriptPath, cwd, providerId) => {
+      onExternalSessionDetected: (sessionId, transcriptPath, cwd, providerId, personaKey) => {
         const projectDir = transcriptPath ? path.dirname(transcriptPath) : cwd;
         // Teammate session of a tracked lead? Attach it as a teammate character
         // instead of adopting a generic external agent -- and regardless of the
@@ -235,6 +235,7 @@ export class AgentRuntime {
           this.permissionTimers,
           () => this.store.persist(),
           (agent) => this.handleAgentCreated(agent),
+          personaKey,
         );
       },
       onSessionClear: (agentId, newSessionId, newTranscriptPath) => {
@@ -344,6 +345,17 @@ export class AgentRuntime {
   /** Unregister an agent from every provider's hook event handler. */
   unregisterAgent(sessionId: string): void {
     for (const h of this.hookEventHandlers.values()) h.unregisterAgent(sessionId);
+  }
+
+  /** Re-point an existing agent at a new session id (persona continuity —
+   *  Hermes session ids rotate while the persona persists). */
+  reattachSession(agentId: number, newSessionId: string): void {
+    const agent = this.store.get(agentId);
+    if (!agent) return;
+    if (agent.sessionId) this.unregisterAgent(agent.sessionId);
+    agent.sessionId = newSessionId;
+    this.registerAgent(newSessionId, agentId);
+    this.store.persist();
   }
 
   /** Called when an agent is created or restored: register it for hook routing,
@@ -699,6 +711,7 @@ export class AgentRuntime {
         folderName: folderNameFromCwd(cwd, p.folderName),
         hookDelivered: false,
         providerId: p.provider,
+        personaKey: p.personaKey,
         inputTokens: 0,
         outputTokens: 0,
         contextTokens: 0,

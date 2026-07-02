@@ -33,12 +33,15 @@ export interface HookEvent {
 export interface SessionLifecycleCallbacks {
   /** Called when an external session is detected (unknown session_id in SessionStart).
    *  transcriptPath is undefined for providers without transcripts (OpenCode, Copilot).
-   *  providerId is the id of the HookProvider that delivered the event. */
+   *  providerId is the id of the HookProvider that delivered the event.
+   *  personaKey (Hermes) is the raw envelope's `persona_key`, for stamping the new
+   *  agent so a future session-id rotation can reattach instead of respawning. */
   onExternalSessionDetected?: (
     sessionId: string,
     transcriptPath: string | undefined,
     cwd: string,
     providerId: string,
+    personaKey?: string,
   ) => void;
   /** Called when /clear is detected via hooks (SessionEnd reason=clear + SessionStart source=clear). */
   onSessionClear?: (
@@ -174,6 +177,9 @@ export class HookEventHandler {
       const source = normEvent.source ?? 'unknown';
       const transcriptPath = normEvent.transcriptPath;
       const cwd = normEvent.cwd;
+      // Raw-field read (not part of AgentEvent): adoption metadata specific to
+      // persona-continuity providers (Hermes), same treatment as transcript_path/cwd.
+      const personaKey = typeof event.persona_key === 'string' ? event.persona_key : undefined;
       const tracked = this.isTrackedSession(transcriptPath, cwd);
       if (debug && tracked)
         console.log(`[Pixel Agents] Hook: SessionStart(source=${source}, session=${sid}...)`);
@@ -255,6 +261,7 @@ export class HookEventHandler {
           sessionId: event.session_id,
           transcriptPath,
           cwd: cwd ?? '',
+          personaKey,
         });
       } else {
         if (debug && tracked)
@@ -288,6 +295,7 @@ export class HookEventHandler {
         pending.transcriptPath,
         pending.cwd,
         this.provider.id,
+        pending.personaKey,
       );
       // Re-process this event now that the agent exists
       this.handleEvent(_providerId, event);

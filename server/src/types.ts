@@ -36,6 +36,10 @@ export interface AgentState {
   hooksOnly?: boolean;
   /** Provider that created this agent (defaults to 'claude') */
   providerId?: string;
+  /** Stable identity key (e.g. `${source}:${cwd}`) surviving session-id rotation —
+   *  lets a restarted persona (Hermes bots today) reattach to its existing
+   *  character/seat/EXP instead of spawning a new one. */
+  personaKey?: string;
   /** Set when SessionEnd(reason=clear) fires; cleared when SessionStart(source=clear) reassigns */
   pendingClear?: boolean;
   /** Hook-generated tool ID for PreToolUse/PostToolUse correlation */
@@ -108,6 +112,8 @@ export interface PersistedAgent {
   folderName?: string;
   /** Provider that created this agent (defaults to 'claude') */
   provider?: string;
+  /** Persona continuity key — see AgentState.personaKey. */
+  personaKey?: string;
 
   // -- Agent Teams --
   teamName?: string;

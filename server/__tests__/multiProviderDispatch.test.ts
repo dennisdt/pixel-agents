@@ -134,6 +134,40 @@ describe('multi-provider dispatch', () => {
     expect(runtime.getProvider('nope')).toBeUndefined();
   });
 
+  it('reattachSession re-points an agent to a new session id (persona continuity)', () => {
+    const saved: unknown[] = [];
+    store.setAdapter({
+      saveAgents: (a: unknown[]) => {
+        saved.length = 0;
+        saved.push(...a);
+      },
+      loadAgents: () => [],
+      getSetting: (_k: string, d: unknown) => d,
+      setSetting: () => {},
+      saveSeats: () => {},
+      loadSeats: () => ({}),
+    } as never);
+
+    const runtime = new AgentRuntime(store, [fakeProvider('hermes')]);
+    store.set(7, createTestAgent({ id: 7, sessionId: 'old-sess', personaKey: 'cli:/proj/a' }));
+    runtime.registerAgent('old-sess', 7);
+
+    runtime.reattachSession(7, 'new-sess');
+
+    // Old session id no longer routes.
+    runtime.handleHookEvent('hermes', { hook_event_name: 'Stop', session_id: 'old-sess' });
+    expect(messages.filter((m) => m.type === 'agentStatus')).toHaveLength(0);
+
+    // New session id routes to the same agent.
+    runtime.handleHookEvent('hermes', { hook_event_name: 'Stop', session_id: 'new-sess' });
+    const statuses = messages.filter((m) => m.type === 'agentStatus');
+    expect(statuses.some((m) => m.id === 7)).toBe(true);
+
+    // Agent's sessionId updated, and the reattach persisted the store.
+    expect(store.get(7)?.sessionId).toBe('new-sess');
+    expect((saved[0] as { sessionId?: string }).sessionId).toBe('new-sess');
+  });
+
   it('subagent-tool suppression uses provider.subagentToolNames, not literals', () => {
     // Provider where 'Task' is NOT a subagent tool -> agentToolStart must broadcast.
     const provider = fakeProvider('gamma');

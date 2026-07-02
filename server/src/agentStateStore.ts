@@ -165,6 +165,7 @@ export class AgentStateStore {
         projectDir: agent.projectDir,
         folderName: agent.folderName,
         provider: agent.providerId,
+        personaKey: agent.personaKey,
         teamName: agent.teamName,
         agentName: agent.agentName,
         isTeamLead: agent.isTeamLead,

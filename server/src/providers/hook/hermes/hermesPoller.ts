@@ -179,6 +179,7 @@ export class HermesPoller {
       session_id: s.id,
       source: 'external',
       cwd: s.cwd ?? undefined,
+      persona_key: personaKey(s.source, s.cwd),
     });
   }
 

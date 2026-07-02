@@ -236,6 +236,38 @@ describe('HermesPoller', () => {
     expect(events.some((e) => e.envelope.hook_event_name === 'SessionStart')).toBe(false);
     expect(events.some((e) => e.envelope.hook_event_name === 'SessionEnd')).toBe(false);
   });
+
+  // Task 10 (persona continuity): a persona (source+cwd) that already has an
+  // agent must reattach the new session id to it instead of spawning a fresh
+  // character. This is a characterization test — announceSession's reattach
+  // branch landed in Task 9; the new pieces this task adds are personaKey
+  // persistence and runtime.reattachSession (covered elsewhere).
+  it('reattaches a new session id to an existing persona instead of spawning', () => {
+    const reattached: Array<{ agentId: number; sessionId: string }> = [];
+    const p = new HermesPoller({
+      dbPath,
+      onEvent: (pid, env) => events.push({ providerId: pid, envelope: env }),
+      resolvePersonaAgent: (key) => (key === 'cli:/proj/a' ? 7 : undefined),
+      reattachSession: (agentId, sessionId) => reattached.push({ agentId, sessionId }),
+    });
+    insertSession('s2', 'cli', '/proj/a');
+    insertMessage('s2', 'user');
+    p.tick();
+    expect(reattached).toEqual([{ agentId: 7, sessionId: 's2' }]);
+    expect(events.filter((e) => e.envelope.hook_event_name === 'SessionStart')).toHaveLength(0);
+    p.stop();
+  });
+
+  // persona_key must be included on genuine (non-reattach) SessionStart envelopes
+  // too, so the hookEventHandler can stamp it on the newly-created agent and a
+  // later restart of the same persona can find and reattach to it.
+  it('includes persona_key on SessionStart envelopes', () => {
+    insertSession('s1', 'cli', '/proj/a');
+    insertMessage('s1', 'user');
+    poller.tick();
+    const start = events.find((e) => e.envelope.hook_event_name === 'SessionStart');
+    expect(start?.envelope.persona_key).toBe('cli:/proj/a');
+  });
 });
 
 describe('hermesProvider.normalizeHookEvent (Finding 3)', () => {

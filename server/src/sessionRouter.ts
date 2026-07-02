@@ -6,6 +6,10 @@ export interface PendingExternalSession {
   /** Transcript file path. Undefined for providers without transcripts (OpenCode, Copilot). */
   transcriptPath: string | undefined;
   cwd: string;
+  /** Persona continuity key (source+cwd), carried through from the raw envelope's
+   *  `persona_key` field for providers that identify a persistent persona
+   *  independent of the rotating session id (Hermes). */
+  personaKey?: string;
 }
 
 /** An event waiting to be dispatched once its agent registers. */

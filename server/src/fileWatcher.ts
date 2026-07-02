@@ -1085,6 +1085,9 @@ export function adoptExternalSessionFromHook(
 
   persistAgents: () => void,
   onAgentCreated?: (agent: AgentState) => void,
+  /** Persona continuity key (Hermes) — stamped on the new agent so a future
+   *  session-id rotation for the same persona can reattach instead of respawning. */
+  personaKey?: string,
 ): void {
   if (transcriptPath) {
     // File-based provider (Claude, Codex): adopt with JSONL file watching
@@ -1134,6 +1137,7 @@ export function adoptExternalSessionFromHook(
     adoptedAgent.sessionId = sessionId;
     adoptedAgent.hookDelivered = true;
     adoptedAgent.providerId = providerId;
+    adoptedAgent.personaKey = personaKey;
     onAgentCreated?.(adoptedAgent);
   } else {
     // Hooks-only provider (OpenCode, Copilot): no transcript file, all state from hooks
@@ -1164,6 +1168,7 @@ export function adoptExternalSessionFromHook(
       seenUnknownRecordTypes: new Set(),
       folderName,
       providerId,
+      personaKey,
       inputTokens: 0,
       outputTokens: 0,
       contextTokens: 0,

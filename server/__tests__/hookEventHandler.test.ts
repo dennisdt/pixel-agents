@@ -577,10 +577,38 @@ describe('HookEventHandler', () => {
       '/projects/test/ext-sess.jsonl',
       '/projects/test',
       'claude',
+      undefined,
     );
     // Stop was re-processed after agent creation
     const agent = agents.get(2);
     expect(agent?.isWaiting).toBe(true);
+  });
+
+  it('SessionStart with persona_key threads it through to onExternalSessionDetected', () => {
+    const onExternalSessionDetected = vi.fn();
+    handler.setLifecycleCallbacks({ onExternalSessionDetected });
+
+    handler.handleEvent('claude', {
+      hook_event_name: 'SessionStart',
+      session_id: 'persona-sess',
+      source: 'startup',
+      transcript_path: '/projects/test/persona-sess.jsonl',
+      cwd: '/projects/test',
+      persona_key: 'cli:/projects/test',
+    });
+
+    handler.handleEvent('claude', {
+      hook_event_name: 'Stop',
+      session_id: 'persona-sess',
+    });
+
+    expect(onExternalSessionDetected).toHaveBeenCalledWith(
+      'persona-sess',
+      '/projects/test/persona-sess.jsonl',
+      '/projects/test',
+      'claude',
+      'cli:/projects/test',
+    );
   });
 
   it('file-based provider: SessionStart with cwd but no transcript_path is NOT adopted', () => {
@@ -760,6 +788,7 @@ describe('HookEventHandler', () => {
       undefined,
       '/projects/test',
       'claude',
+      undefined,
     );
   });
 

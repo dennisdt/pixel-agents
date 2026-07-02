@@ -21,6 +21,8 @@ export interface PersistedAgent {
   projectDir: string;
   folderName?: string;
   provider?: string;
+  /** Persona continuity key (source+cwd for Hermes) — survives session-id rotation. */
+  personaKey?: string;
   teamName?: string;
   agentName?: string;
   isTeamLead?: boolean;
