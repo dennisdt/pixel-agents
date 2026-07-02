@@ -8,6 +8,7 @@
  * Each connecting WebSocket client receives the full state on webviewReady.
  */
 
+import * as os from 'os';
 import * as path from 'path';
 
 import { AgentRuntime } from './agentRuntime.js';
@@ -24,7 +25,14 @@ import { readConfig } from './configPersistence.js';
 import { MAX_PORT, MIN_PORT } from './constants.js';
 import { flushDirectoryStats, loadDirectoryStats } from './directoryStats.js';
 import { FileStateAdapter } from './fileStateAdapter.js';
-import { claudeProvider, codexProvider, copyHookScript } from './providers/index.js';
+import { HERMES_DB_RELATIVE_PATH } from './providers/hook/hermes/constants.js';
+import {
+  claudeProvider,
+  codexProvider,
+  copyHookScript,
+  HermesPoller,
+  hermesProvider,
+} from './providers/index.js';
 import { PixelAgentsServer } from './server.js';
 
 // ── Argument parsing ──────────────────────────────────────────
@@ -125,7 +133,7 @@ async function main(): Promise<void> {
 
   try {
     // Create runtime first (before server.start, so we can pass it in)
-    const runtime = new AgentRuntime(store, [claudeProvider, codexProvider]);
+    const runtime = new AgentRuntime(store, [claudeProvider, codexProvider, hermesProvider]);
 
     // Wire hook events: HTTP POST -> runtime -> hookEventHandler -> agents
     server.onHookEvent((providerId, event) => {
@@ -232,6 +240,24 @@ async function main(): Promise<void> {
     runtime.hooksEnabled.current = adapter.getSetting('pixel-agents.hooksEnabled', true);
     runtime.watchAllSessions.current = adapter.getSetting('pixel-agents.watchAllSessions', false);
 
+    // LOCAL-ONLY: hermes state.db poller (config-gated, default off)
+    let hermesPoller: HermesPoller | null = null;
+    if (adapter.getSetting('pixel-agents.hermesEnabled', false)) {
+      hermesPoller = new HermesPoller({
+        dbPath: path.join(os.homedir(), HERMES_DB_RELATIVE_PATH),
+        onEvent: (providerId, envelope) => runtime.handleHookEvent(providerId, envelope),
+        resolvePersonaAgent: (key) => {
+          for (const [id, agent] of store) {
+            if (agent.providerId === 'hermes' && agent.personaKey === key) return id;
+          }
+          return undefined;
+        },
+        reattachSession: (agentId, sessionId) => runtime.reattachSession(agentId, sessionId),
+      });
+      hermesPoller.start();
+      console.log('[Pixel Agents] Hermes poller started');
+    }
+
     // Install hooks on startup if the persisted setting says so. Each provider's
     // install is independently try/caught (see onSetHooksEnabled above) so a
     // failure for one (e.g. codex without ~/.codex) doesn't block the others.
@@ -299,6 +325,7 @@ async function main(): Promise<void> {
     function shutdown(): void {
       console.log('\nShutting down...');
       flushDirectoryStats();
+      hermesPoller?.stop();
       runtime.dispose();
       server.stop();
       process.exit(0);

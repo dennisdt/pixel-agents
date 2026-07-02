@@ -14,3 +14,6 @@
 export { claudeProvider } from './hook/claude/claude.js';
 export { copyHookScript } from './hook/claude/claudeHookInstaller.js';
 export { codexProvider } from './hook/codex/codex.js';
+// LOCAL-ONLY (do not include in upstream PRs): hermes provider + poller.
+export { hermesProvider } from './hook/hermes/hermes.js';
+export { HermesPoller } from './hook/hermes/hermesPoller.js';

@@ -34,9 +34,10 @@ describe('FileStateAdapter', () => {
     expect(adapter.getSetting('pixel-agents.soundEnabled', false)).toBe(true);
     expect(adapter.getSetting('pixel-agents.watchAllSessions', true)).toBe(false);
     expect(adapter.getSetting('pixel-agents.lastSeenVersion', 'x')).toBe('');
+    expect(adapter.getSetting('pixel-agents.hermesEnabled', true)).toBe(false);
   });
 
-  it('round-trips each of the 6 setting keys', () => {
+  it('round-trips each of the 7 setting keys', () => {
     const adapter = new FileStateAdapter({ namespace: 'standalone' });
 
     adapter.setSetting('pixel-agents.soundEnabled', false);
@@ -45,6 +46,7 @@ describe('FileStateAdapter', () => {
     adapter.setSetting('pixel-agents.watchAllSessions', true);
     adapter.setSetting('pixel-agents.hooksEnabled', false);
     adapter.setSetting('pixel-agents.hooksInfoShown', true);
+    adapter.setSetting('pixel-agents.hermesEnabled', true);
 
     expect(adapter.getSetting('pixel-agents.soundEnabled', true)).toBe(false);
     expect(adapter.getSetting('pixel-agents.lastSeenVersion', '')).toBe('1.3');
@@ -52,6 +54,7 @@ describe('FileStateAdapter', () => {
     expect(adapter.getSetting('pixel-agents.watchAllSessions', false)).toBe(true);
     expect(adapter.getSetting('pixel-agents.hooksEnabled', true)).toBe(false);
     expect(adapter.getSetting('pixel-agents.hooksInfoShown', false)).toBe(true);
+    expect(adapter.getSetting('pixel-agents.hermesEnabled', false)).toBe(true);
   });
 
   it('vscode and standalone namespaces are isolated in config.json', () => {
