@@ -175,7 +175,7 @@ export class AgentRuntime {
 
     // Wire hook lifecycle callbacks to shared agent operations, on every handler.
     const lifecycleCallbacks: SessionLifecycleCallbacks = {
-      onExternalSessionDetected: (sessionId, transcriptPath, cwd) => {
+      onExternalSessionDetected: (sessionId, transcriptPath, cwd, providerId) => {
         const projectDir = transcriptPath ? path.dirname(transcriptPath) : cwd;
         // Teammate session of a tracked lead? Attach it as a teammate character
         // instead of adopting a generic external agent -- and regardless of the
@@ -225,6 +225,7 @@ export class AgentRuntime {
           sessionId,
           transcriptPath,
           cwd,
+          providerId,
           this.knownJsonlFiles,
           this.store.nextAgentId,
           this.store,
@@ -472,6 +473,7 @@ export class AgentRuntime {
       sessionId,
       jsonlFile,
       cwd,
+      'claude', // launch-from-web only spawns Claude sessions in v1
       this.knownJsonlFiles,
       this.store.nextAgentId,
       this.store,
@@ -567,6 +569,7 @@ export class AgentRuntime {
           s.sessionId,
           s.jsonlFile,
           s.cwd,
+          'claude', // listLiveClaudeSessions is Claude-only by construction
           this.knownJsonlFiles,
           this.store.nextAgentId,
           this.store,
@@ -695,6 +698,7 @@ export class AgentRuntime {
         cwd,
         folderName: folderNameFromCwd(cwd, p.folderName),
         hookDelivered: false,
+        providerId: p.provider,
         inputTokens: 0,
         outputTokens: 0,
         contextTokens: 0,

@@ -1067,6 +1067,7 @@ export function adoptExternalSessionFromHook(
   sessionId: string,
   transcriptPath: string | undefined,
   cwd: string,
+  providerId: string,
   knownJsonlFiles: Set<string>,
   nextAgentIdRef: { current: number },
   agents: AgentStateStore,
@@ -1119,6 +1120,7 @@ export function adoptExternalSessionFromHook(
     }
     adoptedAgent.sessionId = sessionId;
     adoptedAgent.hookDelivered = true;
+    adoptedAgent.providerId = providerId;
     onAgentCreated?.(adoptedAgent);
   } else {
     // Hooks-only provider (OpenCode, Copilot): no transcript file, all state from hooks
@@ -1148,6 +1150,7 @@ export function adoptExternalSessionFromHook(
       linesProcessed: 0,
       seenUnknownRecordTypes: new Set(),
       folderName,
+      providerId,
       inputTokens: 0,
       outputTokens: 0,
       contextTokens: 0,

@@ -11,7 +11,6 @@ import { HUE_SHIFT_MAX_DEG, PALETTE_COUNT } from './constants.js';
 import { getDirectoryStatsSnapshot } from './directoryStats.js';
 import { launchClaudeInTmux, listRecentProjects } from './launcher.js';
 import { readLayoutFromFile, writeLayoutToFile } from './layoutPersistence.js';
-import { claudeProvider } from './providers/index.js';
 
 type WsSend = (message: Record<string, unknown>) => void;
 
@@ -103,7 +102,8 @@ export function handleClientMessage(
       if (!runtime) break;
       const folderPath = (msg.folderPath as string) || process.cwd();
       const bypass = msg.bypassPermissions === true;
-      const projectDir = claudeProvider.getSessionDirs?.(folderPath)?.[0];
+      const provider = runtime.getProvider('claude');
+      const projectDir = provider?.getSessionDirs?.(folderPath)?.[0];
       if (!projectDir) break;
       const sessionId = crypto.randomUUID();
       const jsonlFile = path.join(projectDir, `${sessionId}.jsonl`);
@@ -248,11 +248,14 @@ function handleWebviewReady(send: WsSend, ctx: ClientMessageContext): void {
   const adapter = store.getAdapter();
 
   // 1. Provider capabilities (must arrive before any agent messages)
-  send({
-    type: 'providerCapabilities',
-    readingTools: [...claudeProvider.readingTools],
-    subagentToolNames: [...claudeProvider.subagentToolNames],
-  });
+  for (const provider of runtime?.getProviders() ?? []) {
+    send({
+      type: 'providerCapabilities',
+      providerId: provider.id,
+      readingTools: [...provider.readingTools],
+      subagentToolNames: [...provider.subagentToolNames],
+    });
+  }
 
   // 2. Assets (from server cache, loaded at startup via pngjs)
   if (cache) {
@@ -337,6 +340,7 @@ function handleWebviewReady(send: WsSend, ctx: ClientMessageContext): void {
   const persistedSeats = adapter?.loadSeats() ?? {};
   const agentMeta: Record<number, { palette?: number; hueShift?: number; seatId?: string }> = {};
   const cwds: Record<number, string> = {};
+  const providers: Record<number, string> = {};
   for (const [id, agent] of store) {
     agentIds.push(id);
     if (agent.folderName) {
@@ -354,6 +358,7 @@ function handleWebviewReady(send: WsSend, ctx: ClientMessageContext): void {
     if (agent.cwd) {
       cwds[id] = agent.cwd;
     }
+    providers[id] = agent.providerId ?? 'claude';
   }
   send({
     type: 'existingAgents',
@@ -362,6 +367,7 @@ function handleWebviewReady(send: WsSend, ctx: ClientMessageContext): void {
     folderNames,
     externalAgents,
     cwds,
+    providers,
   });
 
   // 7. Layout last (see step 3): flushes the webview's buffered existingAgents

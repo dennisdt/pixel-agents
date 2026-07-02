@@ -70,6 +70,7 @@ export type ClientMessage =
 
 export interface ProviderCapabilities {
   type: 'providerCapabilities';
+  providerId: string;
   readingTools: string[];
   subagentToolNames: string[];
 }
@@ -82,6 +83,7 @@ export interface AgentCreated {
   palette?: number;
   hueShift?: number;
   cwd?: string;
+  provider?: string;
 }
 
 export interface AgentClosed {
@@ -101,6 +103,7 @@ export interface ExistingAgents {
   agentMeta: Record<string, AgentSeatMeta>;
   folderNames: Record<string, string>;
   externalAgents: Record<string, boolean>;
+  providers?: Record<string, string>;
 }
 
 export interface AgentSeatMeta {

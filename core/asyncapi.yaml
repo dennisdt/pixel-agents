@@ -160,10 +160,13 @@ components:
         sub-agent characters.
       type: object
       additionalProperties: false
-      required: [type, readingTools, subagentToolNames]
+      required: [type, providerId, readingTools, subagentToolNames]
       properties:
         type:
           const: providerCapabilities
+        providerId:
+          type: string
+          description: Identifier of the provider these capabilities belong to (e.g. 'claude', 'codex').
         readingTools:
           type: array
           items:
@@ -198,6 +201,9 @@ components:
         cwd:
           type: string
           description: Working directory of the session (keys directory-scoped EXP/leveling).
+        provider:
+          type: string
+          description: Provider that created this agent (absent means 'claude', for back-compat with older servers).
 
     AgentClosed:
       description: An agent has been removed from the office.
@@ -255,6 +261,11 @@ components:
           description: Map of agent ID (string) to external flag.
           additionalProperties:
             type: boolean
+        providers:
+          type: object
+          description: Map of agent ID (string) to provider ID (e.g. 'claude', 'codex').
+          additionalProperties:
+            type: string
 
     AgentStatus:
       description: Active vs waiting state for an agent (drives character animation).

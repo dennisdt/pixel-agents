@@ -102,6 +102,21 @@ describe('multi-provider dispatch', () => {
     expect(messages.filter((m) => m.type === 'agentStatus')).toHaveLength(0);
   });
 
+  it('persists and restores providerId', () => {
+    const saved: unknown[] = [];
+    store.setAdapter({
+      saveAgents: (a: unknown[]) => saved.push(...a),
+      loadAgents: () => [],
+      getSetting: (_k: string, d: unknown) => d,
+      setSetting: () => {},
+      saveSeats: () => {},
+      loadSeats: () => ({}),
+    } as never);
+    store.set(1, createTestAgent({ id: 1, providerId: 'codex' }));
+    store.persist();
+    expect((saved[0] as { provider?: string }).provider).toBe('codex');
+  });
+
   it('getProvider/getProviders expose the registry', () => {
     const alpha = fakeProvider('alpha');
     const runtime = new AgentRuntime(store, [alpha, fakeProvider('beta')]);

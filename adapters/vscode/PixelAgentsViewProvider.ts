@@ -118,6 +118,7 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
         hooksOnly: agent.hooksOnly || undefined,
         palette: agent.palette,
         hueShift: agent.hueShift,
+        provider: agent.providerId,
       });
     });
     this.store.on('agentRemoved', (id) => {
@@ -378,6 +379,7 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
         // from the first frame.
         this.webview?.postMessage({
           type: 'providerCapabilities',
+          providerId: claudeProvider.id,
           readingTools: [...claudeProvider.readingTools],
           subagentToolNames: [...claudeProvider.subagentToolNames],
         });

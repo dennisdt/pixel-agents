@@ -289,6 +289,7 @@ export function persistAgents(agents: AgentStateStore, adapter: StateAdapter): v
       jsonlFile: agent.jsonlFile,
       projectDir: agent.projectDir,
       folderName: agent.folderName,
+      provider: agent.providerId,
       teamName: agent.teamName,
       agentName: agent.agentName,
       isTeamLead: agent.isTeamLead,
@@ -384,6 +385,7 @@ export function restoreAgents(
       seenUnknownRecordTypes: new Set(),
       folderName: p.folderName,
       hookDelivered: false,
+      providerId: p.provider,
       inputTokens: 0,
       outputTokens: 0,
       contextTokens: 0,
@@ -552,6 +554,9 @@ export function sendExistingAgents(
       externalAgents[id] = true;
     }
   }
+  const providers = Object.fromEntries(
+    [...agents].map(([id, a]) => [id, a.providerId ?? 'claude']),
+  );
   console.log(
     `[Pixel Agents] sendExistingAgents: agents=${JSON.stringify(agentIds)}, meta=${JSON.stringify(agentMeta)}`,
   );
@@ -562,6 +567,7 @@ export function sendExistingAgents(
     agentMeta,
     folderNames,
     externalAgents,
+    providers,
   });
   // Note: sendCurrentAgentStatuses is called separately AFTER layoutLoaded
   // so that agentStatus/agentToolStart messages arrive after characters are created.

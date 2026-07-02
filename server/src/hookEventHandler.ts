@@ -32,11 +32,13 @@ export interface HookEvent {
 /** Callback for session lifecycle events detected via hooks. */
 export interface SessionLifecycleCallbacks {
   /** Called when an external session is detected (unknown session_id in SessionStart).
-   *  transcriptPath is undefined for providers without transcripts (OpenCode, Copilot). */
+   *  transcriptPath is undefined for providers without transcripts (OpenCode, Copilot).
+   *  providerId is the id of the HookProvider that delivered the event. */
   onExternalSessionDetected?: (
     sessionId: string,
     transcriptPath: string | undefined,
     cwd: string,
+    providerId: string,
   ) => void;
   /** Called when /clear is detected via hooks (SessionEnd reason=clear + SessionStart source=clear). */
   onSessionClear?: (
@@ -285,6 +287,7 @@ export class HookEventHandler {
         pending.sessionId,
         pending.transcriptPath,
         pending.cwd,
+        this.provider.id,
       );
       // Re-process this event now that the agent exists
       this.handleEvent(_providerId, event);
