@@ -173,6 +173,34 @@ describe('codexHookInstaller', () => {
     }
   });
 
+  it('escapes double-quotes in trust-state TOML keys and round-trips through uninstall', async () => {
+    // Double-quotes are escape sequences in TOML basic strings.
+    // Double-quote is a legal POSIX filename character, so we can
+    // reproduce the shape on this machine without mocking path.
+    const root = tmpBase;
+    const quoteHome = path.join(root, 'quo"te');
+    try {
+      fs.mkdirSync(path.join(quoteHome, '.codex'), { recursive: true });
+      fs.writeFileSync(path.join(quoteHome, '.codex', 'config.toml'), 'model = "gpt-5.2-codex"\n');
+      tmpBase = quoteHome; // os.homedir() mock now resolves here
+
+      await installHooks();
+      const tomlPath = path.join(quoteHome, '.codex', 'config.toml');
+      const rawHooksJsonPath = path.join(quoteHome, '.codex', 'hooks.json');
+      const escapedPrefix = rawHooksJsonPath.replace(/"/g, '\\"');
+      const toml = fs.readFileSync(tomlPath, 'utf-8');
+      expect(toml).toContain(`[hooks.state."${escapedPrefix}:pre_tool_use:0:0"]`);
+      expect(toml).not.toContain(`quo"te:`); // raw unescaped quote does not appear in the key
+
+      await uninstallHooks();
+      const tomlAfter = fs.readFileSync(tomlPath, 'utf-8');
+      expect(tomlAfter).not.toContain('[hooks.state."'); // strip matched what we wrote, exactly
+      expect(tomlAfter).toContain('model = "gpt-5.2-codex"'); // foreign content untouched
+    } finally {
+      tmpBase = root;
+    }
+  });
+
   it('rolls back hooks.json when the config.toml write fails (hooks.json existed before, foreign content)', async () => {
     const foreignHooks =
       JSON.stringify(
