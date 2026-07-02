@@ -51,3 +51,4 @@ agent-orchestrator.yaml
 .ao/
 .serena/
 tasks/
+.superpowers/
