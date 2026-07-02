@@ -173,6 +173,10 @@ export class AgentStateStore {
         // path that does reattach) -- cross-restart reattach is a documented
         // follow-up, not a bug to fix here.
         personaKey: agent.personaKey,
+        // Persist the resolved cwd: restore must not depend on re-deriving it
+        // from the transcript (readCwdFromJsonl can't parse non-Claude shapes,
+        // e.g. Codex rollouts), and a cwd-less restored agent earns no EXP.
+        cwd: agent.cwd,
         teamName: agent.teamName,
         agentName: agent.agentName,
         isTeamLead: agent.isTeamLead,

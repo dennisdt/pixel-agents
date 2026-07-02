@@ -52,8 +52,20 @@ export function readCwdFromJsonl(jsonlFile: string): string | undefined {
     const cwdOf = (line: string): string | undefined => {
       if (!line) return undefined;
       try {
-        const cwd = (JSON.parse(line) as { cwd?: unknown }).cwd;
-        return typeof cwd === 'string' && cwd ? cwd : undefined;
+        const rec = JSON.parse(line) as {
+          cwd?: unknown;
+          type?: unknown;
+          payload?: { cwd?: unknown };
+        };
+        // Claude transcripts: flat top-level `cwd` on most records.
+        if (typeof rec.cwd === 'string' && rec.cwd) return rec.cwd;
+        // Codex rollouts: first line is
+        // {"type":"session_meta","payload":{"session_id":...,"cwd":...}}.
+        // Belt-and-braces for agents persisted before PersistedAgent.cwd
+        // existed — restore falls back to this reader.
+        if (rec.type === 'session_meta' && typeof rec.payload?.cwd === 'string' && rec.payload.cwd)
+          return rec.payload.cwd;
+        return undefined;
       } catch {
         return undefined; // malformed line
       }

@@ -805,10 +805,13 @@ export class AgentRuntime {
         continue;
       }
 
-      // Re-derive the display name from the real cwd: persisted state may carry
-      // an old name from the lossy project-dir hash. resolveAndCreditAgent (called
-      // below) reuses this cwd instead of re-reading the file.
-      const cwd = readCwdFromJsonl(p.jsonlFile);
+      // Prefer the persisted cwd (authoritative, provider-agnostic) and only
+      // fall back to re-reading the transcript: readCwdFromJsonl understands
+      // Claude's flat `cwd` field plus Codex's session_meta shape, but agents
+      // persisted before cwd persistence existed need the file fallback.
+      // resolveAndCreditAgent (called below) reuses this cwd instead of
+      // re-reading the file.
+      const cwd = p.cwd || readCwdFromJsonl(p.jsonlFile);
       const agent: AgentState = {
         id: p.id,
         sessionId: p.sessionId || path.basename(p.jsonlFile, '.jsonl'),

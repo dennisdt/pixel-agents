@@ -384,6 +384,10 @@ export function restoreAgents(
       lastDataAt: 0,
       linesProcessed: 0,
       seenUnknownRecordTypes: new Set(),
+      // Persisted cwd (provider-agnostic; non-Claude transcripts aren't parseable
+      // by readCwdFromJsonl's Claude shape). transcriptParser still resolves it
+      // lazily from the JSONL when absent (legacy persisted agents).
+      cwd: p.cwd,
       folderName: p.folderName,
       hookDelivered: false,
       providerId: p.provider,

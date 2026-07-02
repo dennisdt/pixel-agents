@@ -114,6 +114,11 @@ export interface PersistedAgent {
   provider?: string;
   /** Persona continuity key — see AgentState.personaKey. */
   personaKey?: string;
+  /** Real working directory (or EXP bucket for hooks-only providers). Persisted so
+   *  restore doesn't depend on readCwdFromJsonl — non-Claude transcripts (Codex
+   *  rollouts) don't carry Claude's flat top-level `cwd` field. Keys directory EXP.
+   *  Keep in sync with core/src/schemas.ts. */
+  cwd?: string;
 
   // -- Agent Teams --
   teamName?: string;

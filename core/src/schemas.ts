@@ -23,6 +23,11 @@ export interface PersistedAgent {
   provider?: string;
   /** Persona continuity key (source+cwd for Hermes) — survives session-id rotation. */
   personaKey?: string;
+  /** Real working directory (or EXP bucket for hooks-only providers). Persisted so
+   *  restore doesn't depend on readCwdFromJsonl — non-Claude transcripts (Codex
+   *  rollouts) don't carry Claude's flat top-level `cwd` field. Keys directory EXP.
+   *  Keep in sync with server/src/types.ts. */
+  cwd?: string;
   teamName?: string;
   agentName?: string;
   isTeamLead?: boolean;

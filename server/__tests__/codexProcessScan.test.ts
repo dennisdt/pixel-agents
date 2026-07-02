@@ -305,6 +305,118 @@ describe('AgentRuntime.startProcessScan: codex output-token EXP', () => {
     expect(agent.outputTokens).toBe(555);
   });
 
+  it('resumes EXP after a server restart: persisted cwd is preferred over readCwdFromJsonl', () => {
+    // Regression (Wave 3 FIX 5): restoreExternalAgents resolved cwd only via
+    // readCwdFromJsonl, which understands Claude's flat top-level `cwd` field
+    // but not Codex rollouts -- restored codex agents came back with no cwd,
+    // the already-tracked guard blocked the scan from re-adopting them, and
+    // creditCodexOutputTokens's !agent.cwd guard skipped them forever.
+    const rolloutFile = path.join(tmpDir, 'rollout-restore.jsonl');
+    const cwd = path.join(tmpDir, 'proj-restore');
+    // Deliberately NO session_meta/cwd anywhere in the file: only the
+    // persisted cwd can resolve it.
+    fs.writeFileSync(
+      rolloutFile,
+      `${JSON.stringify({ type: 'response_item', payload: { text: 'hi' } })}\n`,
+    );
+
+    const persisted = [
+      {
+        id: 7,
+        sessionId: 'codex-restored-1',
+        terminalName: '',
+        isExternal: true,
+        jsonlFile: rolloutFile,
+        projectDir: path.dirname(rolloutFile),
+        provider: 'codex',
+        cwd,
+      },
+    ];
+    store.setAdapter({
+      loadAgents: () => persisted,
+      saveAgents: vi.fn(),
+    } as unknown as Parameters<typeof store.setAdapter>[0]);
+
+    runtime = new AgentRuntime(store, [claudeProvider as HookProvider, codexProvider]);
+    runtime.restoreExternalAgents(); // restart-simulate
+    expect(store.size).toBe(1);
+    const agent = store.get(7);
+    expect(agent?.cwd).toBe(cwd);
+
+    // watchAllSessions stays OFF: token crediting must not depend on the scan setting.
+    runtime.startProcessScan(); // tick 1: reader baselines existing content
+    fs.appendFileSync(rolloutFile, `${tokenLine(100)}\n`);
+    vi.advanceTimersByTime(PROCESS_SCAN_INTERVAL_MS); // tick 2: credits
+
+    expect(getDirectoryExp(cwd)).toBe(100);
+    expect(broadcasts).toContainEqual({ type: 'directoryExp', directory: cwd, totalExp: 100 });
+  });
+
+  it('belt-and-braces: an agent persisted WITHOUT cwd (pre-fix) resolves it from the rollout session_meta', () => {
+    const cwd = path.join(tmpDir, 'proj-legacy');
+    const rolloutFile = path.join(tmpDir, 'rollout-legacy.jsonl');
+    fs.writeFileSync(
+      rolloutFile,
+      `${JSON.stringify({ type: 'session_meta', payload: { session_id: 'codex-legacy-1', cwd } })}\n`,
+    );
+
+    const persisted = [
+      {
+        id: 8,
+        sessionId: 'codex-legacy-1',
+        terminalName: '',
+        isExternal: true,
+        jsonlFile: rolloutFile,
+        projectDir: path.dirname(rolloutFile),
+        provider: 'codex',
+        // no cwd: persisted by a pre-fix server
+      },
+    ];
+    store.setAdapter({
+      loadAgents: () => persisted,
+      saveAgents: vi.fn(),
+    } as unknown as Parameters<typeof store.setAdapter>[0]);
+
+    runtime = new AgentRuntime(store, [claudeProvider as HookProvider, codexProvider]);
+    runtime.restoreExternalAgents();
+    expect(store.get(8)?.cwd).toBe(cwd); // readCwdFromJsonl's session_meta fallback
+
+    runtime.startProcessScan(); // baseline
+    fs.appendFileSync(rolloutFile, `${tokenLine(30)}\n`);
+    vi.advanceTimersByTime(PROCESS_SCAN_INTERVAL_MS);
+    expect(getDirectoryExp(cwd)).toBe(30);
+  });
+
+  it('round-trips cwd through agentStateStore.persist()', () => {
+    const saved: Array<Array<Record<string, unknown>>> = [];
+    store.setAdapter({
+      loadAgents: () => [],
+      saveAgents: (agents: Array<Record<string, unknown>>) => {
+        saved.push(agents);
+      },
+    } as unknown as Parameters<typeof store.setAdapter>[0]);
+
+    runtime = new AgentRuntime(store, [claudeProvider as HookProvider, codexProvider]);
+    const rolloutFile = path.join(tmpDir, 'rollout-persist.jsonl');
+    const cwd = path.join(tmpDir, 'proj-persist');
+    fs.writeFileSync(
+      rolloutFile,
+      `${JSON.stringify({ type: 'session_meta', payload: { session_id: 'codex-persist-1', cwd } })}\n`,
+    );
+    runtime.handleHookEvent('codex', {
+      hook_event_name: 'SessionStart',
+      session_id: 'codex-persist-1',
+      source: 'startup',
+      transcript_path: rolloutFile,
+      cwd,
+    });
+    runtime.handleHookEvent('codex', { hook_event_name: 'Stop', session_id: 'codex-persist-1' });
+
+    const last = saved.at(-1);
+    expect(last).toBeDefined();
+    expect(last?.[0]?.cwd).toBe(cwd);
+  });
+
   it('accrues EXP for a hook-adopted codex agent even when watchAllSessions is off', () => {
     const rolloutFile = path.join(tmpDir, 'rollout-hook.jsonl');
     const cwd = path.join(tmpDir, 'proj-hook');
