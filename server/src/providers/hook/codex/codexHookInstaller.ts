@@ -115,23 +115,55 @@ function readHooksFile(): CodexHooksFile {
  *  Trust-state keys embed the raw hooks.json path — on Windows that path
  *  contains backslashes, which start escape sequences in TOML basic
  *  strings, so it must be escaped both where we WRITE `[hooks.state."..."]`
- *  sections and where stripOurTrustEntries matches them back out. */
+ *  sections and where removeTrustKeys matches them back out. */
 function escapeTomlKey(s: string): string {
   return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
-/** Strip trust-state sections whose key belongs to our hooks.json entries.
- *  Relies on every section we write containing exactly one single-line
- *  `trusted_hash = "..."` key before the next `[` — if that shape ever
- *  grows (multi-line values, extra keys), revisit this next-`[`-line
- *  termination heuristic. */
-function stripOurTrustEntries(toml: string): string {
-  const keyPrefix = `[hooks.state."${escapeTomlKey(hooksJsonPath())}:`;
+/** Build the trust-state key for one hook entry at a specific event/group/
+ *  hook-in-group position. */
+function trustKey(event: CodexEvent, groupIndex: number, hookIndex: number): string {
+  return `${hooksJsonPath()}:${CODEX_SNAKE_LABELS[event]}:${groupIndex}:${hookIndex}`;
+}
+
+/** Compute the trust-state keys for OUR hook entries as they currently sit
+ *  in the hooks.json groups array (group/hook indices as read from disk,
+ *  before any filtering/rewriting for this call). ~/.codex/hooks.json and
+ *  config.toml are both global, shared with any other tool that installs
+ *  Codex hooks — a foreign tool's group can land at any index, including
+ *  ones that share this hooks.json path. Only entries whose command is ours
+ *  (isOurs) may be removed; everything else (foreign trust, or our own
+ *  stale group-index entries from a since-changed layout) is left alone. */
+function ourCurrentTrustKeys(hooks: Record<string, CodexMatcherGroup[]>): Set<string> {
+  const keys = new Set<string>();
+  for (const event of CODEX_HOOK_EVENTS) {
+    const groups = hooks[event] ?? [];
+    groups.forEach((g, groupIndex) => {
+      g.hooks.forEach((h, hookIndex) => {
+        if (isOurs(h)) keys.add(trustKey(event, groupIndex, hookIndex));
+      });
+    });
+  }
+  return keys;
+}
+
+/** Remove exactly the given trust-state sections by key, leaving every other
+ *  section (including foreign tools' trust entries for the same hooks.json
+ *  path) untouched. Relies on every section we write containing exactly one
+ *  single-line `trusted_hash = "..."` key before the next `[` — if that
+ *  shape ever grows (multi-line values, extra keys), revisit this
+ *  next-`[`-line termination heuristic. */
+function removeTrustKeys(toml: string, keys: Set<string>): string {
+  if (keys.size === 0) return toml;
+  const escaped = new Set([...keys].map(escapeTomlKey));
   const lines = toml.split('\n');
   const out: string[] = [];
   let skipping = false;
   for (const line of lines) {
-    if (line.startsWith('[')) skipping = line.startsWith(keyPrefix);
+    if (line.startsWith('[')) {
+      const match = /^\[hooks\.state\."(.*)"\]$/.exec(line);
+      skipping = !!match && escaped.has(match[1]);
+    }
     if (!skipping) out.push(line);
   }
   return out.join('\n');
@@ -149,6 +181,8 @@ export async function installHooks(): Promise<void> {
 
   const file = readHooksFile();
   const hooks: Record<string, CodexMatcherGroup[]> = file.hooks ?? {};
+  // Snapshot BEFORE the loop below mutates `hooks` in place per event.
+  const staleTrustKeys = ourCurrentTrustKeys(hooks);
   const command = makeCommand();
   const trustEntries: Array<{ key: string; hash: string }> = [];
 
@@ -163,7 +197,7 @@ export async function installHooks(): Promise<void> {
     hooks[event] = groups;
     const groupIndex = groups.length - 1;
     trustEntries.push({
-      key: `${hooksJsonPath()}:${CODEX_SNAKE_LABELS[event]}:${groupIndex}:0`,
+      key: trustKey(event, groupIndex, 0),
       hash: trustHash(event, matcherless ? null : '', command, CODEX_HOOK_TIMEOUT_SEC),
     });
   }
@@ -175,7 +209,7 @@ export async function installHooks(): Promise<void> {
   atomicWrite(hooksJsonPath(), JSON.stringify({ ...file, hooks }, null, 2) + '\n');
   try {
     const toml = fs.existsSync(configTomlPath()) ? fs.readFileSync(configTomlPath(), 'utf-8') : '';
-    let next = stripOurTrustEntries(toml).trimEnd();
+    let next = removeTrustKeys(toml, staleTrustKeys).trimEnd();
     for (const { key, hash } of trustEntries) {
       next += `\n\n[hooks.state."${escapeTomlKey(key)}"]\ntrusted_hash = "${hash}"`;
     }
@@ -201,6 +235,8 @@ export async function installHooks(): Promise<void> {
 export async function uninstallHooks(): Promise<void> {
   if (!fs.existsSync(hooksJsonPath())) return;
   const file = readHooksFile();
+  // Snapshot BEFORE building the filtered `hooks` map below.
+  const staleTrustKeys = ourCurrentTrustKeys(file.hooks ?? {});
   const hooks: Record<string, CodexMatcherGroup[]> = {};
   for (const [event, groups] of Object.entries(file.hooks ?? {})) {
     const kept = groups.filter((g) => !g.hooks.some(isOurs));
@@ -214,7 +250,7 @@ export async function uninstallHooks(): Promise<void> {
   if (fs.existsSync(configTomlPath())) {
     try {
       const toml = fs.readFileSync(configTomlPath(), 'utf-8');
-      atomicWrite(configTomlPath(), stripOurTrustEntries(toml));
+      atomicWrite(configTomlPath(), removeTrustKeys(toml, staleTrustKeys));
     } catch (e) {
       atomicWrite(hooksJsonPath(), prevHooks);
       throw new Error(

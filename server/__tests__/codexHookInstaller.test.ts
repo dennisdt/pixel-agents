@@ -96,6 +96,52 @@ describe('codexHookInstaller', () => {
     expect(await areHooksInstalled()).toBe(true);
   });
 
+  it('preserves a foreign trust entry sharing the same hooks.json path; uninstall removes only ours', async () => {
+    // A foreign group already occupies PreToolUse[0], so ours will land at
+    // index 1 -- and the user (or another tool's installer) has separately
+    // trusted that foreign group's hooks.json entry.
+    const hooksJsonPathStr = path.join(tmpBase, '.codex', 'hooks.json');
+    fs.writeFileSync(
+      hooksJsonPathStr,
+      JSON.stringify({
+        hooks: {
+          PreToolUse: [
+            { matcher: '', hooks: [{ type: 'command', command: 'other-tool-hook', timeout: 3 }] },
+          ],
+        },
+      }),
+    );
+    const foreignTrustSection = `[hooks.state."${hooksJsonPathStr}:pre_tool_use:0:0"]\ntrusted_hash = "sha256:foreign-deadbeef"\n`;
+    fs.writeFileSync(
+      path.join(tmpBase, '.codex', 'config.toml'),
+      `model = "gpt-5.2-codex"\n\n${foreignTrustSection}`,
+    );
+
+    await installHooks();
+
+    const tomlAfterInstall = fs.readFileSync(path.join(tmpBase, '.codex', 'config.toml'), 'utf-8');
+    // Foreign trust entry survives untouched.
+    expect(tomlAfterInstall).toContain(foreignTrustSection.trim());
+    // Ours is written at index 1 (foreign kept index 0).
+    expect(tomlAfterInstall).toContain(`[hooks.state."${hooksJsonPathStr}:pre_tool_use:1:0"]`);
+
+    await uninstallHooks();
+
+    const tomlAfterUninstall = fs.readFileSync(
+      path.join(tmpBase, '.codex', 'config.toml'),
+      'utf-8',
+    );
+    // Foreign trust entry still survives.
+    expect(tomlAfterUninstall).toContain(foreignTrustSection.trim());
+    // Ours is gone.
+    expect(tomlAfterUninstall).not.toContain(`pre_tool_use:1:0`);
+    const hooksAfterUninstall = JSON.parse(fs.readFileSync(hooksJsonPathStr, 'utf-8')) as {
+      hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+    };
+    expect(hooksAfterUninstall.hooks.PreToolUse).toHaveLength(1); // only the foreign group
+    expect(hooksAfterUninstall.hooks.PreToolUse[0].hooks[0].command).toBe('other-tool-hook');
+  });
+
   it('migrates a legacy no-argv install (the current live state)', async () => {
     // Old install: same script, no argv -> posted Codex events to /claude.
     fs.writeFileSync(
