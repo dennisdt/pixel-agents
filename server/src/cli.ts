@@ -246,6 +246,13 @@ async function main(): Promise<void> {
       hermesPoller = new HermesPoller({
         dbPath: path.join(os.homedir(), HERMES_DB_RELATIVE_PATH),
         onEvent: (providerId, envelope) => runtime.handleHookEvent(providerId, envelope),
+        // NOTE: only searches the LIVE in-memory store, so persona continuity
+        // is intra-run -- a rotating Hermes session id reattaches to its
+        // existing character within this server process, but not across a
+        // server restart. restoreExternalAgents skips hooks-only agents
+        // (jsonlFile === '', which is every Hermes agent), so no persisted
+        // persona is ever present here to match against after a restart.
+        // Cross-restart reattach is a documented follow-up, not implemented.
         resolvePersonaAgent: (key) => {
           for (const [id, agent] of store) {
             if (agent.providerId === 'hermes' && agent.personaKey === key) return id;

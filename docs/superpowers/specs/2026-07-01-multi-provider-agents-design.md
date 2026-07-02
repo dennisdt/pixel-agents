@@ -110,7 +110,14 @@ Maintained as a local patch alongside `claudeProcessScan.ts` (per upstream polic
   - `sessions.ended_at` set → `sessionEnd`
 - **Persona continuity:** provider keeps persona key = (`source`, `cwd`) → character
   mapping. A new session id whose key matches an existing character reattaches
-  (keeps seat, EXP, name) instead of despawn/respawn churn. QuantBot survives restarts.
+  (keeps seat, EXP, name) instead of despawn/respawn churn. QuantBot survives
+  session restarts within a server run. Continuity does NOT currently survive a
+  pixel-agents _server_ restart: `restoreExternalAgents` only restores agents
+  with a `jsonlFile` on disk, and hooks-only providers persist `jsonlFile: ''`,
+  so a persisted persona has nothing to reattach to after the process
+  restarts. See `agentStateStore.ts` (persist site) and `cli.ts`
+  (`resolvePersonaAgent`) for the in-code note; cross-restart reattach is a
+  documented follow-up, not yet implemented.
 - No permission bubbles in v1 — `state.db` carries no approval signal. Documented
   future path: dashboard WebSocket `approval.request` (`tui_gateway /api/events`),
   which would need a `StreamProvider` kind (TODO at `core/src/provider.ts:137`).
@@ -128,7 +135,10 @@ Maintained as a local patch alongside `claudeProcessScan.ts` (per upstream polic
 
 ## 5. Error handling
 
-- Unknown provider id on `/api/hooks/:providerId` → 404, event dropped, debug log.
+- Unknown provider id on `/api/hooks/:providerId` → 200 `'ok'`, event dropped in
+  `AgentRuntime.handleHookEvent` with a debug log (not a 404: hook scripts fire
+  off the response, so a non-2xx status would just add noise to their own
+  error handling without anyone downstream reading it).
 - `protocolVersion` mismatch → events dropped (existing behavior, now per provider).
 - Hermes DB unreadable/locked → poller backs off and retries; no agent state changes
   on read failure (WAL read-only connection).
