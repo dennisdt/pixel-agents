@@ -110,7 +110,7 @@ function postToServer(
         {
           hostname: '127.0.0.1',
           port: server.port,
-          path: `${HOOK_API_PREFIX}/claude`,
+          path: `${HOOK_API_PREFIX}/${providerId}`,
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -147,6 +147,13 @@ function postToServer(
     }
   });
 }
+
+// Provider route segment. The same script serves any hook-compatible CLI:
+// installers pass the provider id as argv[2]; absent means 'claude' so
+// existing installs keep working without re-trust/re-install.
+const PROVIDER_ID_PATTERN = /^[a-z0-9-]+$/;
+const providerId = process.argv[2] ?? 'claude';
+if (!PROVIDER_ID_PATTERN.test(providerId)) process.exit(0);
 
 async function main(): Promise<void> {
   let input = '';

@@ -56,13 +56,14 @@ function startRecordingServer(): Promise<{ port: number; received: string[]; clo
   });
 }
 
-/** Run the hook script with given stdin, returns exit code. */
+/** Run the hook script with given stdin and optional argv, returns exit code. */
 function runHookScript(
   stdin: string,
+  args: string[] = [],
   extraEnv: Record<string, string> = {},
 ): Promise<{ code: number | null; stdout: string }> {
   return new Promise((resolve) => {
-    const child = spawn('node', [HOOK_SCRIPT], {
+    const child = spawn('node', [HOOK_SCRIPT, ...args], {
       // Set both HOME (POSIX) and USERPROFILE (Windows) so the child's
       // os.homedir() resolves to the isolated temp dir on every platform.
       env: { ...process.env, HOME: tmpBase, USERPROFILE: tmpBase, ...extraEnv },
@@ -213,6 +214,7 @@ describe('claude-hook.js integration', () => {
 
     const { code } = await runHookScript(
       JSON.stringify({ session_id: 'skip-dead', hook_event_name: 'Stop' }),
+      [],
       { PIXEL_AGENTS_DEBUG_LOG: debugLog },
     );
 
@@ -240,6 +242,7 @@ describe('claude-hook.js integration', () => {
 
     const { code } = await runHookScript(
       JSON.stringify({ session_id: 'malformed-live', hook_event_name: 'Stop' }),
+      [],
       { PIXEL_AGENTS_DEBUG_LOG: debugLog },
     );
 
