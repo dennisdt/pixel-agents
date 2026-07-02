@@ -141,6 +141,7 @@ async function main(): Promise<void> {
     let currentConfig: { port: number; token: string } | null = null;
     const onSetHooksEnabled = async (enabled: boolean): Promise<void> => {
       if (!currentConfig) return;
+      let successCount = 0;
       for (const provider of runtime.getProviders()) {
         try {
           if (enabled) {
@@ -151,6 +152,7 @@ async function main(): Promise<void> {
           } else {
             await provider.uninstallHooks();
           }
+          successCount++;
         } catch (err) {
           console.error(
             `[Pixel Agents] Failed to ${enabled ? 'install' : 'uninstall'} hooks for provider "${provider.id}":`,
@@ -158,15 +160,19 @@ async function main(): Promise<void> {
           );
         }
       }
-      if (enabled) {
+      if (successCount === 0) {
+        console.error(
+          `[Pixel Agents] Failed to ${enabled ? 'install' : 'uninstall'} hooks for all providers (user toggle)`,
+        );
+      } else if (!enabled) {
+        console.log('[Pixel Agents] Hooks uninstalled (user toggle)');
+      } else {
         const copied = copyHookScript(packageRoot);
         console.log(
           copied
             ? '[Pixel Agents] Hooks installed (user toggle)'
             : '[Pixel Agents] Hooks NOT installed (user toggle), hook script missing',
         );
-      } else {
-        console.log('[Pixel Agents] Hooks uninstalled (user toggle)');
       }
     };
 
@@ -230,9 +236,11 @@ async function main(): Promise<void> {
     // install is independently try/caught (see onSetHooksEnabled above) so a
     // failure for one (e.g. codex without ~/.codex) doesn't block the others.
     if (runtime.hooksEnabled.current) {
+      let successCount = 0;
       for (const provider of runtime.getProviders()) {
         try {
           await provider.installHooks(`http://127.0.0.1:${config.port}`, config.token);
+          successCount++;
         } catch (err) {
           console.error(
             `[Pixel Agents] Failed to install hooks for provider "${provider.id}":`,
@@ -240,12 +248,16 @@ async function main(): Promise<void> {
           );
         }
       }
-      const copied = copyHookScript(packageRoot);
-      console.log(
-        copied
-          ? '[Pixel Agents] Hooks installed'
-          : '[Pixel Agents] Hooks NOT installed, hook script missing',
-      );
+      if (successCount > 0) {
+        const copied = copyHookScript(packageRoot);
+        console.log(
+          copied
+            ? '[Pixel Agents] Hooks installed'
+            : '[Pixel Agents] Hooks NOT installed, hook script missing',
+        );
+      } else {
+        console.error('[Pixel Agents] Hooks installation failed for all providers');
+      }
     }
 
     // Start scanning for external sessions (Claude running in user's terminal)

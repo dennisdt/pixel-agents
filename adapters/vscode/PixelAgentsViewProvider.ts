@@ -215,19 +215,31 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
           // Each provider's install is independently try/caught: the codex installer
           // throws on config.toml failure and one provider's failure must not break
           // the others or become an unhandled rejection.
-          for (const provider of this.runtime.getProviders()) {
-            provider
-              .installHooks(`http://127.0.0.1:${config.port}`, config.token)
-              .catch((err) =>
-                console.error(
-                  `[Pixel Agents] Failed to install hooks for provider "${provider.id}":`,
-                  err,
-                ),
+          Promise.all(
+            this.runtime.getProviders().map((provider) =>
+              provider
+                .installHooks(`http://127.0.0.1:${config.port}`, config.token)
+                .then(() => true)
+                .catch((err) => {
+                  console.error(
+                    `[Pixel Agents] Failed to install hooks for provider "${provider.id}":`,
+                    err,
+                  );
+                  return false;
+                }),
+            ),
+          ).then((results) => {
+            if (results.some(Boolean)) {
+              const copied = copyHookScript(this.context.extensionPath);
+              console.log(
+                copied
+                  ? '[Pixel Agents] Hooks installed'
+                  : '[Pixel Agents] Hooks NOT installed, hook script missing',
               );
-          }
-          if (!copyHookScript(this.context.extensionPath)) {
-            console.warn('[Pixel Agents] Hook script not copied, hooks may not fire');
-          }
+            } else {
+              console.error('[Pixel Agents] Hooks installation failed for all providers');
+            }
+          });
         }
         console.log(`[Pixel Agents] Server: ready on port ${config.port}`);
       })
@@ -321,25 +333,34 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
         // become an unhandled rejection.
         if (enabled) {
           const serverConfig = this.pixelAgentsServer?.getConfig();
-          for (const provider of this.runtime.getProviders()) {
-            provider
-              .installHooks(
-                serverConfig ? `http://127.0.0.1:${serverConfig.port}` : '',
-                serverConfig?.token ?? '',
-              )
-              .catch((err) =>
-                console.error(
-                  `[Pixel Agents] Failed to install hooks for provider "${provider.id}":`,
-                  err,
-                ),
+          Promise.all(
+            this.runtime.getProviders().map((provider) =>
+              provider
+                .installHooks(
+                  serverConfig ? `http://127.0.0.1:${serverConfig.port}` : '',
+                  serverConfig?.token ?? '',
+                )
+                .then(() => true)
+                .catch((err) => {
+                  console.error(
+                    `[Pixel Agents] Failed to install hooks for provider "${provider.id}":`,
+                    err,
+                  );
+                  return false;
+                }),
+            ),
+          ).then((results) => {
+            if (results.some(Boolean)) {
+              const copied = copyHookScript(this.context.extensionPath);
+              console.log(
+                copied
+                  ? '[Pixel Agents] Hooks enabled by user'
+                  : '[Pixel Agents] Hooks NOT fully enabled, hook script missing',
               );
-          }
-          const copied = copyHookScript(this.context.extensionPath);
-          console.log(
-            copied
-              ? '[Pixel Agents] Hooks enabled by user'
-              : '[Pixel Agents] Hooks NOT fully enabled, hook script missing',
-          );
+            } else {
+              console.error('[Pixel Agents] Hooks installation failed for all providers');
+            }
+          });
         } else {
           for (const provider of this.runtime.getProviders()) {
             provider
@@ -411,12 +432,14 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
         // Provider capabilities: tool taxonomy for webview animation + subagent rendering.
         // Sent once before restoreAgents so characters render with correct animations
         // from the first frame.
-        this.webview?.postMessage({
-          type: 'providerCapabilities',
-          providerId: claudeProvider.id,
-          readingTools: [...claudeProvider.readingTools],
-          subagentToolNames: [...claudeProvider.subagentToolNames],
-        });
+        for (const provider of this.runtime.getProviders()) {
+          this.webview?.postMessage({
+            type: 'providerCapabilities',
+            providerId: provider.id,
+            readingTools: [...provider.readingTools],
+            subagentToolNames: [...provider.subagentToolNames],
+          });
+        }
 
         // Settings + folder→Area mappings MUST be dispatched BEFORE restoreAgents
         // and the auto-spawn path. Both paths emit `agentCreated` postMessages via
