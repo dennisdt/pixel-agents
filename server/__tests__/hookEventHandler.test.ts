@@ -582,6 +582,31 @@ describe('HookEventHandler', () => {
     expect(agent?.isWaiting).toBe(true);
   });
 
+  it('file-based provider: SessionStart with cwd but no transcript_path is NOT adopted', () => {
+    // Claude (usesTranscriptFile) always writes a transcript. A SessionStart
+    // carrying only a cwd (transient/headless invocation, e.g. launched from /)
+    // must not be stored as pending — confirming it would mint a transcript-less
+    // "hooks-only" zombie agent that no scanner can ever reap.
+    const onExternalSessionDetected = vi.fn();
+    handler.setLifecycleCallbacks({ onExternalSessionDetected });
+
+    handler.handleEvent('claude', {
+      hook_event_name: 'SessionStart',
+      session_id: 'no-transcript-sess',
+      source: 'startup',
+      cwd: '/',
+    });
+
+    // A later confirmation event must find no pending session → no agent created.
+    handler.handleEvent('claude', {
+      hook_event_name: 'Stop',
+      session_id: 'no-transcript-sess',
+    });
+
+    expect(onExternalSessionDetected).not.toHaveBeenCalled();
+    expect(agents.size).toBe(0);
+  });
+
   // ── Resume ──────────────────────────────────────────────────
 
   it('SessionStart(source=resume) calls onSessionResume', () => {
@@ -686,11 +711,23 @@ describe('HookEventHandler', () => {
 
   // ── Provider-agnostic (optional transcript_path) ────────────
 
-  it('SessionStart stores pending with cwd only (no transcript_path)', () => {
+  it('hooks-only provider: SessionStart stores pending with cwd only (no transcript_path)', () => {
+    // A provider with usesTranscriptFile=false has no transcript at all, so a
+    // cwd-only SessionStart is the only signal it ever gets — it must still be
+    // adopted. (Claude, a file-based provider, is covered by the negative test
+    // above.)
+    const hooksOnlyProvider = { ...claudeProvider, usesTranscriptFile: false };
+    const hooksOnlyHandler = new HookEventHandler(
+      agents,
+      waitingTimers,
+      permissionTimers,
+      hooksOnlyProvider,
+      new SessionRouter(),
+    );
     const onExternalSessionDetected = vi.fn();
-    handler.setLifecycleCallbacks({ onExternalSessionDetected });
+    hooksOnlyHandler.setLifecycleCallbacks({ onExternalSessionDetected });
 
-    handler.handleEvent('claude', {
+    hooksOnlyHandler.handleEvent('claude', {
       hook_event_name: 'SessionStart',
       session_id: 'no-transcript-sess',
       source: 'startup',
@@ -708,11 +745,11 @@ describe('HookEventHandler', () => {
         projectDir: '/projects/test',
       } as Partial<AgentState>);
       agents.set(2, agent);
-      handler.registerAgent(sessionId, 2);
+      hooksOnlyHandler.registerAgent(sessionId, 2);
     });
 
     // Confirmation event creates agent
-    handler.handleEvent('claude', {
+    hooksOnlyHandler.handleEvent('claude', {
       hook_event_name: 'Stop',
       session_id: 'no-transcript-sess',
     });

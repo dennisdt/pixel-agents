@@ -230,7 +230,17 @@ export class HookEventHandler {
       // Unknown session -- store as pending, create only when a confirmation event
       // arrives (Stop, Notification, PermissionRequest). This filters transient sessions
       // from Claude Code Extension which fire SessionStart + SessionEnd without any activity.
-      if (transcriptPath || cwd) {
+      //
+      // A file-based provider (Claude) always writes a transcript; a SessionStart
+      // with a cwd but no transcript_path is a transient/headless run (e.g. launched
+      // from / or $HOME). Adopting it would mint a transcript-less "hooks-only" agent
+      // that no scanner can ever reap (process-scan + stale-check both require a
+      // jsonlFile), leaving a permanent idle zombie with no project. Only genuinely
+      // hooks-only providers may be adopted from cwd alone.
+      const canAdopt = this.provider.usesTranscriptFile
+        ? Boolean(transcriptPath)
+        : Boolean(transcriptPath || cwd);
+      if (canAdopt) {
         // For --resume, clear dismissals so the file can be re-adopted
         if (normEvent.source === 'resume' && transcriptPath) {
           this.lifecycleCallbacks.onSessionResume?.(transcriptPath);

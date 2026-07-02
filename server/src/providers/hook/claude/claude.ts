@@ -282,6 +282,7 @@ export const claudeProvider: HookProvider = {
   id: 'claude',
   displayName: 'Claude Code',
   protocolVersion: 1,
+  usesTranscriptFile: true,
 
   normalizeHookEvent,
 

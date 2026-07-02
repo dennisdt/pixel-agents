@@ -73,6 +73,13 @@ export interface HookProvider {
    *  / TeamProvider / HookProvider. Start at 1. */
   readonly protocolVersion: number;
 
+  /** Whether the provider's sessions are backed by a transcript file on disk
+   *  (Claude: true). File-based sessions are adopted and reaped via their
+   *  transcript; a SessionStart without a transcript_path is a transient run we
+   *  must NOT adopt (it would create an un-reapable, transcript-less agent).
+   *  Set false only for providers that emit state purely through hooks. */
+  readonly usesTranscriptFile: boolean;
+
   /** Normalize a raw hook event payload into an AgentEvent.
    *  Each CLI sends different JSON (Claude: snake_case, Copilot: camelCase, etc.)
    *  The provider translates to the common AgentEvent format.
