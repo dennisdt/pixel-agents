@@ -23,7 +23,9 @@ interface SessionRow {
   cwd: string | null;
   ended_at: number | null;
 }
-interface MessageRow {
+// Exported so a test subclass can type-check a `processRow` override (see
+// hermesPoller.test.ts's row-failure seam).
+export interface MessageRow {
   id: number;
   session_id: string;
   role: string;
@@ -38,10 +40,20 @@ export function personaKey(source: string, cwd: string | null): string {
   return `${source}:${cwd ?? ''}`;
 }
 
+/** True when the sessions row has a persisted end (checked via `!== null &&
+ *  !== undefined` rather than `!=` for eqeqeq compliance). Shared by
+ *  `ensureSession` (skip announcing already-ended sessions) and `reapEnded`
+ *  (detect newly-ended sessions). */
+function isSessionEnded(row: { ended_at: number | null } | undefined): boolean {
+  return row?.ended_at !== null && row?.ended_at !== undefined;
+}
+
 export class HermesPoller {
   private db: DatabaseSync | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
-  private cursor = -1; // -1 = first tick pending
+  // `protected` (not `private`) so a test subclass can assert cursor position
+  // around a simulated row-processing failure (see hermesPoller.test.ts).
+  protected cursor = -1; // -1 = first tick pending
   /** Sessions we've announced, with last-activity for inactivity reaping. */
   private readonly known = new Map<string, { lastActivityMs: number }>();
 
@@ -89,11 +101,13 @@ export class HermesPoller {
         .all(this.cursor, HERMES_MAX_ROWS_PER_TICK) as unknown as MessageRow[];
 
       for (const row of rows) {
+        // Process fully BEFORE advancing the cursor. If processRow throws (e.g. a
+        // WAL checkpoint race), the loop unwinds into the outer catch below without
+        // recording this row's id, so a retried tick re-reads and reprocesses it
+        // instead of permanently skipping it. Rows already advanced past are not
+        // re-emitted since the query is `id > cursor`.
+        this.processRow(db, row);
         this.cursor = row.id;
-        this.ensureSession(db, row.session_id);
-        this.emitForRow(row);
-        const s = this.known.get(row.session_id);
-        if (s) s.lastActivityMs = Date.now();
       }
 
       this.reapEnded(db);
@@ -122,12 +136,33 @@ export class HermesPoller {
     }
   }
 
+  /**
+   * Process one message row: announce its session if unseen, emit the row's
+   * synthesized event(s), and refresh the session's last-activity timestamp.
+   * `protected` (not `private`) so a test subclass can override it to force a
+   * failure on a specific row and verify `tick()`'s cursor-integrity behavior
+   * without needing to corrupt the DB mid-read (see hermesPoller.test.ts).
+   */
+  protected processRow(db: DatabaseSync, row: MessageRow): void {
+    this.ensureSession(db, row.session_id);
+    this.emitForRow(row);
+    const s = this.known.get(row.session_id);
+    if (s) s.lastActivityMs = Date.now();
+  }
+
   private ensureSession(db: DatabaseSync, sessionId: string): void {
     if (this.known.has(sessionId)) return;
     const s = db
       .prepare('SELECT id, source, cwd, ended_at FROM sessions WHERE id = ?')
       .get(sessionId) as unknown as SessionRow | undefined;
-    if (s) this.announceSession(s);
+    if (!s) return;
+    // Finding 2: trailing message rows can be processed after their session has
+    // already ended (e.g. under HERMES_MAX_ROWS_PER_TICK backpressure, so the
+    // row lags behind the session's ended_at). Announcing here would emit a
+    // spurious SessionStart that reapEnded immediately follows with SessionEnd
+    // in the same tick. Skip entirely: don't add to `known`, don't emit.
+    if (isSessionEnded(s)) return;
+    this.announceSession(s);
   }
 
   private announceSession(s: SessionRow): void {
@@ -193,7 +228,7 @@ export class HermesPoller {
         .get(sessionId) as unknown as
         | { ended_at: number | null; end_reason: string | null }
         | undefined;
-      const endedInDb = s?.ended_at !== null && s?.ended_at !== undefined;
+      const endedInDb = isSessionEnded(s);
       const inactive = now - meta.lastActivityMs > HERMES_INACTIVITY_TIMEOUT_MS;
       if (endedInDb || inactive) {
         this.known.delete(sessionId);

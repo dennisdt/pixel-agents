@@ -24,7 +24,21 @@ function normalizeHookEvent(
       };
     }
     case 'PostToolUse':
-      return { sessionId, event: { kind: 'toolEnd', toolId: 'current' } };
+      // The poller attaches the real tool_call_id (see hermesPoller.ts's emitForRow);
+      // preserve it here rather than discarding it into the 'current' sentinel.
+      // NOTE: as of writing, hookEventHandler's dispatch for 'toolEnd' calls
+      // handlePostToolUse(agent, agentId) WITHOUT the normalized event, so it
+      // still correlates via its own single-slot `agent.currentHookToolId` state
+      // (Claude-parity, see claude.ts's normalizeHookEvent comment) rather than
+      // event.toolId. This preserves the data at the normalization boundary
+      // without changing rendered behavior for parallel calls today.
+      return {
+        sessionId,
+        event: {
+          kind: 'toolEnd',
+          toolId: typeof raw.tool_call_id === 'string' ? raw.tool_call_id : 'current',
+        },
+      };
     case 'Stop':
       return { sessionId, event: { kind: 'turnEnd' } };
     case 'SessionStart':
