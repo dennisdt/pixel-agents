@@ -30,7 +30,7 @@ export interface HookEvent {
  * suppresses heuristic timers (permission 7s, text-idle 5s) for that agent.
  */
 /** Callback for session lifecycle events detected via hooks. */
-interface SessionLifecycleCallbacks {
+export interface SessionLifecycleCallbacks {
   /** Called when an external session is detected (unknown session_id in SessionStart).
    *  transcriptPath is undefined for providers without transcripts (OpenCode, Copilot). */
   onExternalSessionDetected?: (
@@ -452,7 +452,7 @@ export class HookEventHandler {
     // tool ID (not the transient hook ID) so that SubagentStop/tool_result cleanup
     // can find and remove them. JSONL handles agentToolStart (with runInBackground)
     // for these tools.
-    if (toolName !== 'Task' && toolName !== 'Agent') {
+    if (!this.provider.subagentToolNames.has(toolName)) {
       this.agents.broadcast({
         type: 'agentToolStart',
         id: agentId,

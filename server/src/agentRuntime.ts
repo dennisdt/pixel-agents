@@ -41,7 +41,7 @@ import {
   startFileWatching,
   startStaleExternalAgentCheck,
 } from './fileWatcher.js';
-import type { HookEvent } from './hookEventHandler.js';
+import type { HookEvent, SessionLifecycleCallbacks } from './hookEventHandler.js';
 import { HookEventHandler } from './hookEventHandler.js';
 import { folderNameFromCwd, readCwdFromJsonl } from './jsonl.js';
 import { assignPaletteIfNeeded } from './paletteAssigner.js';
@@ -56,6 +56,8 @@ import {
   setTeamSwitchCallback,
 } from './transcriptParser.js';
 import type { AgentState } from './types.js';
+
+const debug = process.env.PIXEL_AGENTS_DEBUG !== '0';
 
 /** Callbacks that adapters register for platform-specific behavior. */
 export interface RuntimeLifecycleCallbacks {
@@ -93,21 +95,25 @@ export class AgentRuntime {
   readonly dismissalTracker = new DismissalTracker();
   /** Shadow-store watcher for unnamed background spawns (sub-agents). */
   readonly subagentWatch: SubagentWatch;
-  private hookEventHandler: HookEventHandler;
+  private readonly hookEventHandlers = new Map<string, HookEventHandler>();
+  private readonly providers: HookProvider[];
   private lifecycleCallbacks: RuntimeLifecycleCallbacks = {};
 
   constructor(
     private readonly store: AgentStateStore,
-    provider: HookProvider,
+    providers: HookProvider[],
   ) {
-    // Wire module-level dependencies
+    this.providers = providers;
+    // The primary provider (index 0) owns the file-watching/transcript-parsing
+    // singletons — those modules are single-provider by design (Claude today).
+    const primary = providers[0];
     setDismissalTracker(this.dismissalTracker);
-    setHookProvider(provider);
-    setFileWatcherHookProvider(provider);
+    setHookProvider(primary);
+    setFileWatcherHookProvider(primary);
     this.subagentWatch = new SubagentWatch(store);
     setSubagentWatch(this.subagentWatch);
-    if (provider.team) {
-      setTeamProvider(provider.team);
+    if (primary.team) {
+      setTeamProvider(primary.team);
     }
     setAgentRemovalCallback((id) => this.removeAgent(id));
     setTeammateRemovalCallback((id) => this.removeTeammate(id, 'team-config'));
@@ -153,17 +159,22 @@ export class AgentRuntime {
       }
     });
 
-    this.hookEventHandler = new HookEventHandler(
-      store,
-      this.waitingTimers,
-      this.permissionTimers,
-      provider,
-      new SessionRouter(),
-      this.watchAllSessions,
-    );
+    for (const provider of providers) {
+      this.hookEventHandlers.set(
+        provider.id,
+        new HookEventHandler(
+          store,
+          this.waitingTimers,
+          this.permissionTimers,
+          provider,
+          new SessionRouter(),
+          this.watchAllSessions,
+        ),
+      );
+    }
 
-    // Wire hook lifecycle callbacks to shared agent operations
-    this.hookEventHandler.setLifecycleCallbacks({
+    // Wire hook lifecycle callbacks to shared agent operations, on every handler.
+    const lifecycleCallbacks: SessionLifecycleCallbacks = {
       onExternalSessionDetected: (sessionId, transcriptPath, cwd) => {
         const projectDir = transcriptPath ? path.dirname(transcriptPath) : cwd;
         // Teammate session of a tracked lead? Attach it as a teammate character
@@ -289,7 +300,10 @@ export class AgentRuntime {
           this.removeAgent(agentId);
         }
       },
-    });
+    };
+    for (const h of this.hookEventHandlers.values()) {
+      h.setLifecycleCallbacks(lifecycleCallbacks);
+    }
   }
 
   /** Register adapter-specific lifecycle callbacks. */
@@ -299,19 +313,36 @@ export class AgentRuntime {
 
   // ── Hook event routing ──
 
-  /** Route an incoming hook event to the appropriate agent. */
+  /** All registered providers (index 0 = primary). */
+  getProviders(): HookProvider[] {
+    return this.providers;
+  }
+
+  /** Look up a registered provider by id. */
+  getProvider(id: string): HookProvider | undefined {
+    return this.providers.find((p) => p.id === id);
+  }
+
+  /** Route an incoming hook event to the handler for its provider. */
   handleHookEvent(providerId: string, event: Record<string, unknown>): void {
-    this.hookEventHandler.handleEvent(providerId, event as HookEvent);
+    const handler = this.hookEventHandlers.get(providerId);
+    if (!handler) {
+      if (debug) console.log(`[Pixel Agents] Dropping event for unknown provider "${providerId}"`);
+      return;
+    }
+    handler.handleEvent(providerId, event as HookEvent);
   }
 
-  /** Register an agent with the hook event handler for session->agent mapping. */
+  /** Register an agent with every provider's hook event handler for session->agent
+   *  mapping. Cross-registering in every router is safe: each router only buffers
+   *  events that arrived at its own handler, so flushes stay provider-correct. */
   registerAgent(sessionId: string, agentId: number): void {
-    this.hookEventHandler.registerAgent(sessionId, agentId);
+    for (const h of this.hookEventHandlers.values()) h.registerAgent(sessionId, agentId);
   }
 
-  /** Unregister an agent from the hook event handler. */
+  /** Unregister an agent from every provider's hook event handler. */
   unregisterAgent(sessionId: string): void {
-    this.hookEventHandler.unregisterAgent(sessionId);
+    for (const h of this.hookEventHandlers.values()) h.unregisterAgent(sessionId);
   }
 
   /** Called when an agent is created or restored: register it for hook routing,
@@ -716,7 +747,7 @@ export class AgentRuntime {
 
   /** Clean up all scanners, timers, and agents. Called on shutdown. */
   dispose(): void {
-    this.hookEventHandler.dispose();
+    for (const h of this.hookEventHandlers.values()) h.dispose();
     this.subagentWatch.dispose();
 
     if (this.projectScanTimer.current) {
