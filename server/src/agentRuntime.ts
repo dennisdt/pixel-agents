@@ -214,7 +214,21 @@ export class AgentRuntime {
             }
           }
         }
-        if (!isTrackedProjectDir(projectDir) && !this.watchAllSessions.current) {
+        // The tracked-dir gate exists to filter transient Claude Extension
+        // sessions for the PRIMARY provider only (tracked dirs are Claude's
+        // ~/.claude/projects/<hash> workspace roots). Non-primary providers
+        // (Codex: ~/.codex/sessions/YYYY/MM/DD, Hermes: raw cwd) can never
+        // match a tracked dir, so gating them the same way silently drops
+        // every non-primary SessionStart when watchAllSessions is off. A
+        // hook-confirmed session for a non-primary provider is already real
+        // by construction -- it went through HookEventHandler's
+        // pending->confirmation flow -- so it bypasses this gate.
+        const isPrimaryProvider = providerId === primary.id;
+        if (
+          isPrimaryProvider &&
+          !isTrackedProjectDir(projectDir) &&
+          !this.watchAllSessions.current
+        ) {
           console.log(
             `[Pixel Agents] Hook: external session ${sessionId.slice(0, 8)}... not adopted ` +
               `(project untracked, Watch All Sessions off)`,

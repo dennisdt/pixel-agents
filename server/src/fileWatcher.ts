@@ -1618,23 +1618,39 @@ export function startStaleExternalAgentCheck(
   hooksEnabledRef?: { current: boolean },
 ): ReturnType<typeof setInterval> {
   return setInterval(() => {
-    // When hooks are active, SessionEnd handles agent cleanup.
-    if (hooksEnabledRef?.current) return;
+    const primaryProviderId = getFileWatcherHookProvider()?.id;
     const toRemove: number[] = [];
 
     for (const [id, agent] of agents) {
       if (!agent.isExternal) continue;
 
-      // Only despawn if the JSONL file has been deleted from disk.
-      // Inactive external agents stay alive so they can resume when
-      // the session continues (e.g., claude --resume).
+      // Non-primary-provider agents (Codex, Hermes, ...) never get a
+      // SessionEnd hook, so hooks mode can't clean them up the way it does
+      // Claude (the primary provider). Their mtime-based staleness check
+      // below is the only reaping path outside the standalone
+      // watchAllSessions process scan -- it still runs even when hooks are
+      // enabled. Primary-provider agents keep the existing hooks-mode skip
+      // (SessionEnd handles them there).
+      const isNonPrimaryProviderAgent =
+        !!agent.providerId && agent.providerId !== primaryProviderId;
+      if (hooksEnabledRef?.current && !isNonPrimaryProviderAgent) continue;
+
       try {
-        fs.statSync(agent.jsonlFile);
-        // File still exists — keep the agent alive regardless of mtime
+        const stat = fs.statSync(agent.jsonlFile);
+        if (hooksEnabledRef?.current && isNonPrimaryProviderAgent) {
+          // Hooks-mode, non-primary provider: mtime staleness is the only
+          // signal -- e.g. a Codex rollout file is never deleted on session end.
+          if (Date.now() - stat.mtimeMs <= EXTERNAL_ACTIVE_THRESHOLD_MS) continue;
+        } else {
+          // Heuristic mode: only despawn if the JSONL file has been deleted
+          // from disk. Inactive external agents stay alive so they can resume
+          // when the session continues (e.g., claude --resume).
+          continue;
+        }
       } catch {
         // File deleted — remove agent
-        toRemove.push(id);
       }
+      toRemove.push(id);
     }
 
     for (const id of toRemove) {

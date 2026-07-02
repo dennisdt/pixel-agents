@@ -1,14 +1,22 @@
-import type * as fs from 'fs';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { HookProvider } from '../../core/src/provider.js';
 import { AgentRuntime } from '../src/agentRuntime.js';
 import { AgentStateStore } from '../src/agentStateStore.js';
+import {
+  EXTERNAL_ACTIVE_THRESHOLD_MS,
+  EXTERNAL_STALE_CHECK_INTERVAL_MS,
+} from '../src/constants.js';
 import { DismissalTracker } from '../src/dismissalTracker.js';
 import {
   adoptExternalSessionFromHook,
+  setAgentRemovalCallback,
   setDismissalTracker,
   setHookProvider,
+  startStaleExternalAgentCheck,
 } from '../src/fileWatcher.js';
 import { HookEventHandler } from '../src/hookEventHandler.js';
 import { claudeProvider } from '../src/providers/hook/claude/claude.js';
@@ -305,5 +313,121 @@ describe('adoptExternalSessionFromHook: transcript watching gated to primary pro
     // The primary provider's transcript is parseable -> watcher/poll timer starts.
     expect(pollingTimers.size).toBe(1);
     expect(pollingTimers.has(agent.id)).toBe(true);
+  });
+});
+
+describe('AgentRuntime.onExternalSessionDetected: provider-aware tracked-dir gate', () => {
+  // Tracked dirs are seeded only by ensureProjectScan (Claude workspace roots),
+  // so a Codex sessions dir (~/.codex/sessions/YYYY/MM/DD) or a Hermes raw cwd
+  // is never tracked. These tests use paths no other test in this suite tracks.
+  let store: AgentStateStore;
+
+  beforeEach(() => {
+    store = new AgentStateStore();
+  });
+
+  it('adopts a hook-confirmed codex session with an untracked projectDir, watchAllSessions=false', () => {
+    const runtime = new AgentRuntime(store, [claudeProvider, codexProvider]);
+    const transcriptPath = '/tmp/pxl-finding1-test/codex/sessions/2026/07/01/codex-sess.jsonl';
+
+    // SessionStart only stores a pending session -- not yet adopted.
+    runtime.handleHookEvent('codex', {
+      hook_event_name: 'SessionStart',
+      session_id: 'codex-gate-sess',
+      source: 'startup',
+      transcript_path: transcriptPath,
+      cwd: '/Users/test/some-project',
+    });
+    expect(store.size).toBe(0);
+
+    // Stop confirms the pending session -> onExternalSessionDetected fires.
+    runtime.handleHookEvent('codex', {
+      hook_event_name: 'Stop',
+      session_id: 'codex-gate-sess',
+    });
+
+    expect(store.size).toBe(1);
+    const agent = [...store.values()][0];
+    expect(agent.providerId).toBe('codex');
+    expect(agent.jsonlFile).toBe(transcriptPath);
+  });
+
+  it('does NOT adopt a hook-confirmed claude session with an untracked projectDir, watchAllSessions=false', () => {
+    const runtime = new AgentRuntime(store, [claudeProvider, codexProvider]);
+    const transcriptPath = '/tmp/pxl-finding1-test/claude/untracked-project/claude-sess.jsonl';
+
+    runtime.handleHookEvent('claude', {
+      hook_event_name: 'SessionStart',
+      session_id: 'claude-gate-sess',
+      source: 'startup',
+      transcript_path: transcriptPath,
+      cwd: '/Users/test/some-project',
+    });
+    expect(store.size).toBe(0);
+
+    runtime.handleHookEvent('claude', {
+      hook_event_name: 'Stop',
+      session_id: 'claude-gate-sess',
+    });
+
+    // The tracked-dir gate still applies to the primary provider (filters
+    // transient Claude Extension sessions) -> not adopted.
+    expect(store.size).toBe(0);
+  });
+});
+
+describe('startStaleExternalAgentCheck: hooks-mode reaping gated by provider', () => {
+  let store: AgentStateStore;
+  let knownJsonlFiles: Set<string>;
+  let removedIds: number[];
+  let tmpDir: string;
+
+  beforeEach(() => {
+    // claude is the primary (index 0) provider in every real runtime wiring.
+    setHookProvider(claudeProvider);
+    removedIds = [];
+    setAgentRemovalCallback((id) => {
+      removedIds.push(id);
+      store.delete(id);
+    });
+    store = new AgentStateStore();
+    knownJsonlFiles = new Set();
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-stale-test-'));
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    setAgentRemovalCallback(null);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('reaps a stale codex agent but keeps a stale claude agent alive, with hooks enabled', () => {
+    const codexFile = path.join(tmpDir, 'codex-sess.jsonl');
+    const claudeFile = path.join(tmpDir, 'claude-sess.jsonl');
+    fs.writeFileSync(codexFile, '');
+    fs.writeFileSync(claudeFile, '');
+    const staleMtime = new Date(Date.now() - EXTERNAL_ACTIVE_THRESHOLD_MS - 60_000);
+    fs.utimesSync(codexFile, staleMtime, staleMtime);
+    fs.utimesSync(claudeFile, staleMtime, staleMtime);
+
+    store.set(
+      10,
+      createTestAgent({ id: 10, isExternal: true, providerId: 'codex', jsonlFile: codexFile }),
+    );
+    store.set(
+      11,
+      createTestAgent({ id: 11, isExternal: true, providerId: 'claude', jsonlFile: claudeFile }),
+    );
+
+    startStaleExternalAgentCheck(store, knownJsonlFiles, { current: true });
+    vi.advanceTimersByTime(EXTERNAL_STALE_CHECK_INTERVAL_MS);
+
+    // Codex has no SessionEnd hook -- mtime staleness reaps it even though
+    // hooks are enabled.
+    expect(removedIds).toEqual([10]);
+    expect(store.has(10)).toBe(false);
+    // Claude keeps the hooks-mode skip -- SessionEnd is its cleanup path.
+    expect(store.has(11)).toBe(true);
   });
 });
