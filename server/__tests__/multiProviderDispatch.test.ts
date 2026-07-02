@@ -455,6 +455,36 @@ describe('startStaleExternalAgentCheck: hooks-mode reaping gated by provider', (
     expect(store.has(12)).toBe(true);
   });
 
+  it('skips reaping a codex agent whose jsonlFile is in the live set, even past NON_PRIMARY_STALE_TIMEOUT_MS, and resumes reaping once the process exits', () => {
+    // Guards the Codex process-liveness fix: a live rollout file that's gone
+    // quiet between turns must never be reaped just because it's idle -- the
+    // live set (populated by AgentRuntime's process scan) is the authority.
+    const codexFile = path.join(tmpDir, 'codex-sess-live.jsonl');
+    fs.writeFileSync(codexFile, '');
+    const staleMtime = new Date(Date.now() - NON_PRIMARY_STALE_TIMEOUT_MS - 60_000);
+    fs.utimesSync(codexFile, staleMtime, staleMtime);
+
+    store.set(
+      13,
+      createTestAgent({ id: 13, isExternal: true, providerId: 'codex', jsonlFile: codexFile }),
+    );
+
+    const liveJsonlFiles = new Set([codexFile]);
+    startStaleExternalAgentCheck(store, knownJsonlFiles, { current: true }, liveJsonlFiles);
+    vi.advanceTimersByTime(EXTERNAL_STALE_CHECK_INTERVAL_MS);
+
+    expect(removedIds).toEqual([]);
+    expect(store.has(13)).toBe(true);
+
+    // Process exits -> AgentRuntime's next scan tick drops the file from the
+    // live set -> normal mtime-staleness reaping resumes.
+    liveJsonlFiles.delete(codexFile);
+    vi.advanceTimersByTime(EXTERNAL_STALE_CHECK_INTERVAL_MS);
+
+    expect(removedIds).toEqual([13]);
+    expect(store.has(13)).toBe(false);
+  });
+
   it('Finding A: hooks-only agent (providerId hermes, jsonlFile "") survives the stale check', () => {
     store.set(
       20,

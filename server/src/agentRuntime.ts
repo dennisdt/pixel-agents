@@ -47,6 +47,10 @@ import { HookEventHandler } from './hookEventHandler.js';
 import { folderNameFromCwd, readCwdFromJsonl } from './jsonl.js';
 import { assignPaletteIfNeeded } from './paletteAssigner.js';
 import { PathSet, pathsMatch } from './pathKey.js';
+import {
+  listLiveCodexSessions,
+  type LiveCodexSession,
+} from './providers/hook/codex/codexProcessScan.js';
 import { SessionRouter } from './sessionRouter.js';
 import { SubagentWatch } from './subagentWatch.js';
 import { cancelPermissionTimer, cancelWaitingTimer } from './timerManager.js';
@@ -87,6 +91,10 @@ export class AgentRuntime {
   private processScanTimer: ReturnType<typeof setInterval> | null = null;
   /** Per-file count of consecutive process scans with no live process + stale file. */
   private readonly liveSessionMisses = new Map<string, number>();
+  /** Rollout files of currently-live Codex processes, refreshed every process-scan
+   *  tick. Threaded into startStaleExternalAgentCheck so it never reaps a live
+   *  session on mtime alone (Codex has no SessionEnd hook -- see startProcessScan). */
+  readonly liveCodexJsonlFiles = new Set<string>();
 
   // Configuration refs (mutable, shared with scanners)
   readonly watchAllSessions = { current: false };
@@ -573,6 +581,7 @@ export class AgentRuntime {
       this.store,
       this.knownJsonlFiles,
       this.hooksEnabled,
+      this.liveCodexJsonlFiles,
     );
   }
 
@@ -589,7 +598,13 @@ export class AgentRuntime {
     if (this.processScanTimer) return;
 
     const tick = (): void => {
-      if (!this.watchAllSessions.current) return;
+      if (!this.watchAllSessions.current) {
+        // Scan disabled -- forget any previously-live Codex files so
+        // startStaleExternalAgentCheck's live-set skip doesn't protect them
+        // forever (see below: the set is otherwise only refreshed here).
+        this.liveCodexJsonlFiles.clear();
+        return;
+      }
 
       let live: LiveClaudeSession[];
       try {
@@ -665,6 +680,38 @@ export class AgentRuntime {
       // (removed via X-close / SessionEnd / reassign) so the Map can't leak.
       for (const file of this.liveSessionMisses.keys()) {
         if (!externalFiles.has(file)) this.liveSessionMisses.delete(file);
+      }
+
+      // Codex has no SessionEnd hook, so a live rollout file that's gone quiet
+      // between turns is only visible to this process scan -- without it,
+      // startStaleExternalAgentCheck's mtime-based reap (NON_PRIMARY_STALE_TIMEOUT_MS)
+      // would remove it and this scan would immediately re-adopt it next tick.
+      // liveCodexJsonlFiles is threaded into startStaleExternalAgentCheck so it
+      // skips reaping any file still in this set (see startStaleCheck).
+      let liveCodex: LiveCodexSession[];
+      try {
+        liveCodex = listLiveCodexSessions();
+      } catch {
+        liveCodex = [];
+      }
+      this.liveCodexJsonlFiles.clear();
+      for (const s of liveCodex) {
+        this.liveCodexJsonlFiles.add(s.rolloutFile);
+        adoptExternalSessionFromHook(
+          s.sessionId,
+          s.rolloutFile,
+          s.cwd,
+          'codex',
+          this.knownJsonlFiles,
+          this.store.nextAgentId,
+          this.store,
+          this.fileWatchers,
+          this.pollingTimers,
+          this.waitingTimers,
+          this.permissionTimers,
+          () => this.store.persist(),
+          (agent) => this.handleAgentCreated(agent),
+        );
       }
     };
 

@@ -1617,6 +1617,12 @@ export function startStaleExternalAgentCheck(
   agents: AgentStateStore,
   knownJsonlFiles: Set<string>,
   hooksEnabledRef?: { current: boolean },
+  /** Rollout files of currently-live processes (Codex process scan). An agent
+   *  whose jsonlFile is in this set is never reaped by mtime staleness below --
+   *  its process is confirmed running, so an idle rollout file (no writes
+   *  between turns) must not be mistaken for a dead session. Reaping resumes
+   *  once the process exits and the file drops out of the set. */
+  liveJsonlFiles?: Set<string>,
 ): ReturnType<typeof setInterval> {
   return setInterval(() => {
     const primaryProviderId = getFileWatcherHookProvider()?.id;
@@ -1632,6 +1638,8 @@ export function startStaleExternalAgentCheck(
       // reapEnded/inactivity check, which fires SessionEnd through the
       // normal hook path; this scanner must leave them alone entirely.
       if (!agent.jsonlFile) continue;
+
+      if (liveJsonlFiles?.has(agent.jsonlFile)) continue;
 
       // Non-primary-provider agents (Codex, Hermes, ...) never get a
       // SessionEnd hook, so hooks mode can't clean them up the way it does

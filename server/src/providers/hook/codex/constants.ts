@@ -36,3 +36,10 @@ export const CODEX_MATCHERLESS_EVENTS = new Set(['Stop', 'UserPromptSubmit']);
 
 export const CODEX_TERMINAL_NAME_PREFIX = 'Codex';
 export const CODEX_HOOK_TIMEOUT_SEC = 5;
+
+// ── Process Liveness Scanning (codexProcessScan.ts) ─────────
+/** Bytes read from the start of a Codex rollout file when looking for its
+ *  first-line `session_meta` record. session_meta lines are small JSON
+ *  objects; this generous bound avoids truncating one while avoiding a full
+ *  read of a potentially large rollout file. */
+export const CODEX_SESSION_META_READ_BYTES = 65_536; // 64KB
