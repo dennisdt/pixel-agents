@@ -798,6 +798,76 @@ describe('HookEventHandler', () => {
     );
   });
 
+  it('hooks-only provider: SessionStart with NO identifying fields is NOT adopted (forgery guard)', () => {
+    // Wave 3 FIX 6: the relaxed hooks-only gate rests on "real by construction"
+    // (the provider's poller announced the session), but the HTTP endpoint only
+    // checks the bearer token. A forged SessionStart+confirmation with zero
+    // identifying fields would mint a nameless, permanently un-reapable agent
+    // (hooksOnly agents skip the stale check via the jsonlFile-'' guard). The
+    // content layer of the trust boundary: at least one of persona_key,
+    // folder_hint, exp_bucket, or cwd must be a non-empty string.
+    const hooksOnlyProvider = { ...claudeProvider, usesTranscriptFile: false };
+    const hooksOnlyHandler = new HookEventHandler(
+      agents,
+      waitingTimers,
+      permissionTimers,
+      hooksOnlyProvider,
+      new SessionRouter(),
+    );
+    const onExternalSessionDetected = vi.fn();
+    hooksOnlyHandler.setLifecycleCallbacks({ onExternalSessionDetected });
+
+    hooksOnlyHandler.handleEvent('claude', {
+      hook_event_name: 'SessionStart',
+      session_id: 'forged-sess',
+      source: 'startup',
+    });
+    hooksOnlyHandler.handleEvent('claude', {
+      hook_event_name: 'Stop',
+      session_id: 'forged-sess',
+    });
+
+    expect(onExternalSessionDetected).not.toHaveBeenCalled();
+    expect(agents.size).toBe(0);
+  });
+
+  it('hooks-only provider: SessionStart with persona_key only IS adopted', () => {
+    // HermesPoller always sends persona_key + exp_bucket, so any single
+    // identifying field must suffice — real adoption is unaffected by the
+    // forgery guard.
+    const hooksOnlyProvider = { ...claudeProvider, usesTranscriptFile: false };
+    const hooksOnlyHandler = new HookEventHandler(
+      agents,
+      waitingTimers,
+      permissionTimers,
+      hooksOnlyProvider,
+      new SessionRouter(),
+    );
+    const onExternalSessionDetected = vi.fn();
+    hooksOnlyHandler.setLifecycleCallbacks({ onExternalSessionDetected });
+
+    hooksOnlyHandler.handleEvent('claude', {
+      hook_event_name: 'SessionStart',
+      session_id: 'persona-only-sess',
+      source: 'startup',
+      persona_key: 'webui:',
+    });
+    hooksOnlyHandler.handleEvent('claude', {
+      hook_event_name: 'Stop',
+      session_id: 'persona-only-sess',
+    });
+
+    expect(onExternalSessionDetected).toHaveBeenCalledWith(
+      'persona-only-sess',
+      undefined,
+      '',
+      'claude',
+      'webui:',
+      undefined, // folderHint
+      undefined, // expBucket
+    );
+  });
+
   it('SessionStart(source=resume) uses cwd for matching when no transcript_path', () => {
     const onSessionClear = vi.fn();
     handler.setLifecycleCallbacks({ onSessionClear });

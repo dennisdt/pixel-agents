@@ -247,17 +247,24 @@ export class HookEventHandler {
       // arrives (Stop, Notification, PermissionRequest). This filters transient sessions
       // from Claude Code Extension which fire SessionStart + SessionEnd without any activity.
       //
-      // A file-based provider (Claude) always writes a transcript; a SessionStart
-      // with a cwd but no transcript_path is a transient/headless run (e.g. launched
-      // from / or $HOME). Adopting it would mint a transcript-less "hooks-only" agent
-      // that no scanner can ever reap (process-scan + stale-check both require a
-      // jsonlFile), leaving a permanent idle zombie with no project. Genuinely
-      // hooks-only providers are adoptable unconditionally -- even without a cwd
-      // (the Hermes webui session has cwd NULL): the session is real by
-      // construction (its provider's poller announced it), and its lifecycle is
-      // poller-owned (SessionEnd + the jsonlFile-'' stale-check skip), so no
-      // zombie risk applies.
-      const canAdopt = this.provider.usesTranscriptFile ? Boolean(transcriptPath) : true;
+      // Adoption trust boundary has two layers:
+      //   1. Transport: the HTTP hook endpoint's bearer token (server.ts).
+      //   2. Content: a file-based provider (Claude) must present a
+      //      transcript_path -- a SessionStart with only a cwd is a
+      //      transient/headless run (e.g. launched from / or $HOME), and
+      //      adopting it would mint a transcript-less agent no scanner can
+      //      ever reap. A hooks-only provider (Hermes) must present at least
+      //      one identifying field -- persona_key, folder_hint, exp_bucket,
+      //      or cwd -- as a non-empty string. Its poller always sends
+      //      persona_key + exp_bucket, so real sessions pass even with cwd
+      //      NULL (the webui persona); a forged SessionStart+confirmation
+      //      with zero identifying fields would otherwise mint a nameless,
+      //      permanently un-reapable agent (hooksOnly agents skip the stale
+      //      check via the jsonlFile-'' guard).
+      const hasHooksOnlyIdentity = Boolean(personaKey || folderHint || expBucket || cwd);
+      const canAdopt = this.provider.usesTranscriptFile
+        ? Boolean(transcriptPath)
+        : hasHooksOnlyIdentity;
       if (canAdopt) {
         // For --resume, clear dismissals so the file can be re-adopted
         if (normEvent.source === 'resume' && transcriptPath) {
