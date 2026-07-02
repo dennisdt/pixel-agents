@@ -10,6 +10,9 @@ export interface PendingExternalSession {
    *  `persona_key` field for providers that identify a persistent persona
    *  independent of the rotating session id (Hermes). */
   personaKey?: string;
+  /** Display-name fallback for cwd-less sessions, carried through from the raw
+   *  envelope's `folder_hint` field (Hermes webui: cwd NULL, hint 'hermes-webui'). */
+  folderHint?: string;
 }
 
 /** An event waiting to be dispatched once its agent registers. */

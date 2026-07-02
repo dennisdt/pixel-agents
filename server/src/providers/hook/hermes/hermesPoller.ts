@@ -7,6 +7,7 @@ import {
   HERMES_HOLDERS_CACHE_MS,
   HERMES_INACTIVITY_TIMEOUT_MS,
   HERMES_MAX_ROWS_PER_TICK,
+  HERMES_PERSONA_BUCKET_PREFIX,
   HERMES_POLL_INTERVAL_MS,
 } from './constants.js';
 
@@ -171,8 +172,7 @@ export class HermesPoller {
   /** First tick: cursor to MAX(id) (never replay history), adopt live+recent sessions. */
   private bootstrap(db: DatabaseSync): void {
     const max = db.prepare('SELECT COALESCE(MAX(id), 0) AS m FROM messages').get() as
-      | { m: number }
-      | undefined;
+      { m: number } | undefined;
     this.cursor = max?.m ?? 0;
     // ORDER BY started_at DESC: the process-backed pass below relies on this
     // ordering to pick "newest per persona" via first-seen dedupe.
@@ -257,6 +257,10 @@ export class HermesPoller {
       source: 'external',
       cwd: s.cwd ?? undefined,
       persona_key: personaKey(s.source, s.cwd),
+      // Display-name fallback for cwd-less sessions (the webui runs with cwd
+      // NULL): there is no directory basename to name the character after, so
+      // adoption falls back to the stable persona identifier instead.
+      folder_hint: s.cwd ? undefined : HERMES_PERSONA_BUCKET_PREFIX + s.source,
     });
   }
 
@@ -316,8 +320,7 @@ export class HermesPoller {
       const s = db
         .prepare('SELECT ended_at, end_reason FROM sessions WHERE id = ?')
         .get(sessionId) as unknown as
-        | { ended_at: number | null; end_reason: string | null }
-        | undefined;
+        { ended_at: number | null; end_reason: string | null } | undefined;
       const endedInDb = isSessionEnded(s);
       // Skip INACTIVITY-reap (not ended_at-reap -- an explicit ended_at still
       // ends it) for processBacked sessions while a foreign holder still

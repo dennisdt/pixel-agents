@@ -35,13 +35,16 @@ export interface SessionLifecycleCallbacks {
    *  transcriptPath is undefined for providers without transcripts (OpenCode, Copilot).
    *  providerId is the id of the HookProvider that delivered the event.
    *  personaKey (Hermes) is the raw envelope's `persona_key`, for stamping the new
-   *  agent so a future session-id rotation can reattach instead of respawning. */
+   *  agent so a future session-id rotation can reattach instead of respawning.
+   *  folderHint (Hermes) is the raw envelope's `folder_hint`, the display-name
+   *  fallback for cwd-less sessions (the webui runs with cwd NULL). */
   onExternalSessionDetected?: (
     sessionId: string,
     transcriptPath: string | undefined,
     cwd: string,
     providerId: string,
     personaKey?: string,
+    folderHint?: string,
   ) => void;
   /** Called when /clear is detected via hooks (SessionEnd reason=clear + SessionStart source=clear). */
   onSessionClear?: (
@@ -177,9 +180,10 @@ export class HookEventHandler {
       const source = normEvent.source ?? 'unknown';
       const transcriptPath = normEvent.transcriptPath;
       const cwd = normEvent.cwd;
-      // Raw-field read (not part of AgentEvent): adoption metadata specific to
+      // Raw-field reads (not part of AgentEvent): adoption metadata specific to
       // persona-continuity providers (Hermes), same treatment as transcript_path/cwd.
       const personaKey = typeof event.persona_key === 'string' ? event.persona_key : undefined;
+      const folderHint = typeof event.folder_hint === 'string' ? event.folder_hint : undefined;
       const tracked = this.isTrackedSession(transcriptPath, cwd);
       if (debug && tracked)
         console.log(`[Pixel Agents] Hook: SessionStart(source=${source}, session=${sid}...)`);
@@ -243,11 +247,13 @@ export class HookEventHandler {
       // with a cwd but no transcript_path is a transient/headless run (e.g. launched
       // from / or $HOME). Adopting it would mint a transcript-less "hooks-only" agent
       // that no scanner can ever reap (process-scan + stale-check both require a
-      // jsonlFile), leaving a permanent idle zombie with no project. Only genuinely
-      // hooks-only providers may be adopted from cwd alone.
-      const canAdopt = this.provider.usesTranscriptFile
-        ? Boolean(transcriptPath)
-        : Boolean(transcriptPath || cwd);
+      // jsonlFile), leaving a permanent idle zombie with no project. Genuinely
+      // hooks-only providers are adoptable unconditionally -- even without a cwd
+      // (the Hermes webui session has cwd NULL): the session is real by
+      // construction (its provider's poller announced it), and its lifecycle is
+      // poller-owned (SessionEnd + the jsonlFile-'' stale-check skip), so no
+      // zombie risk applies.
+      const canAdopt = this.provider.usesTranscriptFile ? Boolean(transcriptPath) : true;
       if (canAdopt) {
         // For --resume, clear dismissals so the file can be re-adopted
         if (normEvent.source === 'resume' && transcriptPath) {
@@ -262,6 +268,7 @@ export class HookEventHandler {
           transcriptPath,
           cwd: cwd ?? '',
           personaKey,
+          folderHint,
         });
       } else {
         if (debug && tracked)
@@ -296,6 +303,7 @@ export class HookEventHandler {
         pending.cwd,
         this.provider.id,
         pending.personaKey,
+        pending.folderHint,
       );
       // Re-process this event now that the agent exists
       this.handleEvent(_providerId, event);

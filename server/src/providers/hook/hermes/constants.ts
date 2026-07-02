@@ -13,6 +13,11 @@ export const HERMES_ACTIVE_THRESHOLD_MS = 600_000; // 10 minutes
 export const HERMES_INACTIVITY_TIMEOUT_MS = 1_800_000; // 30 minutes
 /** Max message rows consumed per tick (backpressure). */
 export const HERMES_MAX_ROWS_PER_TICK = 500;
+/** Prefix for stable per-persona identifiers derived from a session's `source`
+ *  column (`hermes-webui`, `hermes-cli`, ...). Used as the display-name
+ *  fallback (`folder_hint`) for cwd-less sessions — the Hermes webui runs with
+ *  cwd NULL, so there is no directory basename to name the character after. */
+export const HERMES_PERSONA_BUCKET_PREFIX = 'hermes-';
 /** How long to cache the default `hasForeignDbHolders` check's result (an
  *  `lsof -t <dbPath>` shellout). HermesPoller may call it every tick
  *  (HERMES_POLL_INTERVAL_MS = 1s) while any session is process-backed, so an

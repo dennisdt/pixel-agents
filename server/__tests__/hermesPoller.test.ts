@@ -269,6 +269,27 @@ describe('HermesPoller', () => {
     const start = events.find((e) => e.envelope.hook_event_name === 'SessionStart');
     expect(start?.envelope.persona_key).toBe('cli:/proj/a');
   });
+
+  // A cwd-less session (the Hermes webui runs with cwd NULL) has no directory
+  // basename to name the character after -- the SessionStart envelope must carry
+  // a folder_hint ('hermes-<source>') so adoption can fall back to it.
+  it('sets folder_hint hermes-<source> on SessionStart for a cwd-less session', () => {
+    insertSession('s_web', 'webui', null);
+    insertMessage('s_web', 'user');
+    poller.tick();
+    const start = events.find((e) => e.envelope.hook_event_name === 'SessionStart');
+    expect(start?.envelope.session_id).toBe('s_web');
+    expect(start?.envelope.cwd).toBeUndefined();
+    expect(start?.envelope.folder_hint).toBe('hermes-webui');
+  });
+
+  it('omits folder_hint when the session has a real cwd', () => {
+    insertSession('s1', 'cli', '/proj/a');
+    insertMessage('s1', 'user');
+    poller.tick();
+    const start = events.find((e) => e.envelope.hook_event_name === 'SessionStart');
+    expect(start?.envelope.folder_hint).toBeUndefined();
+  });
 });
 
 // Process-backed bootstrap: a live-flagged Hermes session with no recent

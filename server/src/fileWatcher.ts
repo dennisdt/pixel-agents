@@ -1089,6 +1089,9 @@ export function adoptExternalSessionFromHook(
   /** Persona continuity key (Hermes) — stamped on the new agent so a future
    *  session-id rotation for the same persona can reattach instead of respawning. */
   personaKey?: string,
+  /** Display-name fallback for cwd-less hooks-only sessions (the Hermes webui
+   *  runs with cwd NULL, so there is no directory basename to name the agent after). */
+  folderHint?: string,
 ): void {
   if (transcriptPath) {
     // File-based provider (Claude, Codex): adopt with JSONL file watching
@@ -1141,9 +1144,11 @@ export function adoptExternalSessionFromHook(
     adoptedAgent.personaKey = personaKey;
     onAgentCreated?.(adoptedAgent);
   } else {
-    // Hooks-only provider (OpenCode, Copilot): no transcript file, all state from hooks
+    // Hooks-only provider (OpenCode, Copilot, Hermes): no transcript file, all
+    // state from hooks. cwd may be '' (Hermes webui session: cwd NULL) — the
+    // provider-supplied folderHint names the character then.
     const id = nextAgentIdRef.current++;
-    const folderName = folderNameResolver?.({ cwd }) ?? folderNameFromCwd(cwd);
+    const folderName = folderNameResolver?.({ cwd }) ?? folderNameFromCwd(cwd, folderHint);
     const agent: AgentState = {
       id,
       sessionId,

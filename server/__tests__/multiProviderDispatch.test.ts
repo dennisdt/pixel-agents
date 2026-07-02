@@ -22,6 +22,7 @@ import {
 import { HookEventHandler } from '../src/hookEventHandler.js';
 import { claudeProvider } from '../src/providers/hook/claude/claude.js';
 import { codexProvider } from '../src/providers/hook/codex/codex.js';
+import { hermesProvider } from '../src/providers/hook/hermes/hermes.js';
 import { SessionRouter } from '../src/sessionRouter.js';
 import type { AgentState, PersistedAgent } from '../src/types.js';
 
@@ -373,6 +374,59 @@ describe('AgentRuntime.onExternalSessionDetected: provider-aware tracked-dir gat
 
     // The tracked-dir gate still applies to the primary provider (filters
     // transient Claude Extension sessions) -> not adopted.
+    expect(store.size).toBe(0);
+  });
+});
+
+describe('cwd-less hooks-only adoption (hermes webui)', () => {
+  let store: AgentStateStore;
+  let runtime: AgentRuntime;
+
+  beforeEach(() => {
+    store = new AgentStateStore();
+  });
+
+  afterEach(() => {
+    runtime.dispose();
+  });
+
+  it('adopts a hooks-only SessionStart with no cwd, naming the agent from folder_hint', () => {
+    // The Hermes webui session has cwd NULL, so its SessionStart carries neither
+    // transcript_path nor cwd. Hooks-only sessions are real by construction
+    // (their provider's poller announced them) -- the adoption gate must not
+    // require a cwd, or the webui persona can never become a character.
+    runtime = new AgentRuntime(store, [claudeProvider, hermesProvider]);
+
+    runtime.handleHookEvent('hermes', {
+      hook_event_name: 'SessionStart',
+      session_id: 'webui-sess',
+      source: 'external',
+      persona_key: 'webui:',
+      folder_hint: 'hermes-webui',
+    });
+    expect(store.size).toBe(0); // pending, awaiting confirmation
+
+    runtime.handleHookEvent('hermes', { hook_event_name: 'Stop', session_id: 'webui-sess' });
+
+    expect(store.size).toBe(1);
+    const agent = [...store.values()][0];
+    expect(agent.providerId).toBe('hermes');
+    expect(agent.hooksOnly).toBe(true);
+    expect(agent.jsonlFile).toBe('');
+    expect(agent.folderName).toBe('hermes-webui');
+    expect(agent.personaKey).toBe('webui:');
+  });
+
+  it('claude (usesTranscriptFile) is unchanged: SessionStart with neither transcript nor cwd is NOT adoptable', () => {
+    runtime = new AgentRuntime(store, [claudeProvider, hermesProvider]);
+
+    runtime.handleHookEvent('claude', {
+      hook_event_name: 'SessionStart',
+      session_id: 'claude-bare-sess',
+      source: 'startup',
+    });
+    runtime.handleHookEvent('claude', { hook_event_name: 'Stop', session_id: 'claude-bare-sess' });
+
     expect(store.size).toBe(0);
   });
 });

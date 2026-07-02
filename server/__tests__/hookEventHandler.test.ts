@@ -578,6 +578,7 @@ describe('HookEventHandler', () => {
       '/projects/test',
       'claude',
       undefined,
+      undefined, // folderHint — only set for cwd-less sessions
     );
     // Stop was re-processed after agent creation
     const agent = agents.get(2);
@@ -608,6 +609,7 @@ describe('HookEventHandler', () => {
       '/projects/test',
       'claude',
       'cli:/projects/test',
+      undefined, // folderHint — only set for cwd-less sessions
     );
   });
 
@@ -789,6 +791,7 @@ describe('HookEventHandler', () => {
       '/projects/test',
       'claude',
       undefined,
+      undefined, // folderHint — only set for cwd-less sessions
     );
   });
 
