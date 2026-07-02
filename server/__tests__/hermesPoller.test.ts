@@ -3,8 +3,9 @@ import { DatabaseSync } from 'node:sqlite';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { HERMES_INACTIVITY_TIMEOUT_MS } from '../src/providers/hook/hermes/constants.js';
 import { hermesProvider } from '../src/providers/hook/hermes/hermes.js';
 import type { MessageRow } from '../src/providers/hook/hermes/hermesPoller.js';
 import { HermesPoller } from '../src/providers/hook/hermes/hermesPoller.js';
@@ -267,6 +268,105 @@ describe('HermesPoller', () => {
     poller.tick();
     const start = events.find((e) => e.envelope.hook_event_name === 'SessionStart');
     expect(start?.envelope.persona_key).toBe('cli:/proj/a');
+  });
+});
+
+// Process-backed bootstrap: a live-flagged Hermes session with no recent
+// message rows is still alive if a foreign process (e.g. QuantBot/Hermes's own
+// agent) holds the DB open. `hasForeignDbHolders` is injected here (never the
+// real lsof-backed default) so these tests don't depend on real processes.
+describe('HermesPoller: process-backed bootstrap (foreign DB holders)', () => {
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-hermes-holders-'));
+    dbPath = path.join(tmpDir, 'state.db');
+    db = makeDb(dbPath);
+    events = [];
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    db.close();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function makePoller(hasForeignDbHolders: () => boolean): HermesPoller {
+    return new HermesPoller({
+      dbPath,
+      onEvent: (providerId, envelope) => events.push({ providerId, envelope }),
+      resolvePersonaAgent: () => undefined,
+      reattachSession: () => {},
+      hasForeignDbHolders,
+    });
+  }
+
+  it('holders=false does not adopt an idle live session at bootstrap (existing behavior preserved)', () => {
+    const t0 = NOW_S - 3600; // well past HERMES_ACTIVE_THRESHOLD_MS, no messages at all
+    db.prepare('INSERT INTO sessions (id, source, cwd, started_at) VALUES (?,?,?,?)').run(
+      's_idle',
+      'cli',
+      '/proj/a',
+      t0,
+    );
+    const p = makePoller(() => false);
+    p.tick();
+    expect(events.some((e) => e.envelope.hook_event_name === 'SessionStart')).toBe(false);
+    p.stop();
+  });
+
+  it('holders=true adopts only the newest idle live session per persona at bootstrap', () => {
+    const t0 = NOW_S - 3600;
+    db.prepare('INSERT INTO sessions (id, source, cwd, started_at) VALUES (?,?,?,?)').run(
+      's_old',
+      'cli',
+      '/proj/a',
+      t0,
+    );
+    db.prepare('INSERT INTO sessions (id, source, cwd, started_at) VALUES (?,?,?,?)').run(
+      's_new',
+      'cli',
+      '/proj/a',
+      t0 + 100,
+    );
+    const p = makePoller(() => true);
+    p.tick();
+    const starts = events.filter((e) => e.envelope.hook_event_name === 'SessionStart');
+    expect(starts).toHaveLength(1);
+    expect(starts[0]?.envelope.session_id).toBe('s_new');
+    p.stop();
+  });
+
+  it('a processBacked session survives inactivity reap while holders=true, and is reaped once holders flips false', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW_S * 1000);
+
+    const t0 = NOW_S - 3600;
+    db.prepare('INSERT INTO sessions (id, source, cwd, started_at) VALUES (?,?,?,?)').run(
+      's_live',
+      'cli',
+      '/proj/a',
+      t0,
+    );
+
+    let holders = true;
+    const p = makePoller(() => holders);
+    p.tick(); // bootstrap: adopts s_live via the process-backed path
+    expect(
+      events.some(
+        (e) => e.envelope.hook_event_name === 'SessionStart' && e.envelope.session_id === 's_live',
+      ),
+    ).toBe(true);
+    events = [];
+
+    vi.advanceTimersByTime(HERMES_INACTIVITY_TIMEOUT_MS + 60_000); // well past inactivity timeout
+    p.tick(); // reapEnded runs; holders still true -> must NOT reap
+    expect(events.some((e) => e.envelope.hook_event_name === 'SessionEnd')).toBe(false);
+
+    holders = false; // process exits
+    p.tick(); // reapEnded runs again; holders now false -> normal inactivity rules apply
+    const end = events.find((e) => e.envelope.hook_event_name === 'SessionEnd');
+    expect(end?.envelope.session_id).toBe('s_live');
+
+    p.stop();
   });
 });
 

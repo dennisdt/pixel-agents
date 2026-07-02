@@ -13,3 +13,9 @@ export const HERMES_ACTIVE_THRESHOLD_MS = 600_000; // 10 minutes
 export const HERMES_INACTIVITY_TIMEOUT_MS = 1_800_000; // 30 minutes
 /** Max message rows consumed per tick (backpressure). */
 export const HERMES_MAX_ROWS_PER_TICK = 500;
+/** How long to cache the default `hasForeignDbHolders` check's result (an
+ *  `lsof -t <dbPath>` shellout). HermesPoller may call it every tick
+ *  (HERMES_POLL_INTERVAL_MS = 1s) while any session is process-backed, so an
+ *  uncached check would shell out once a second for as long as the session
+ *  lives. */
+export const HERMES_HOLDERS_CACHE_MS = 30_000; // 30 seconds

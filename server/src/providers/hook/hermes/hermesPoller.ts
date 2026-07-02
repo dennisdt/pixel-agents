@@ -1,7 +1,10 @@
 import { DatabaseSync } from 'node:sqlite';
 
+import { execFileSync } from 'child_process';
+
 import {
   HERMES_ACTIVE_THRESHOLD_MS,
+  HERMES_HOLDERS_CACHE_MS,
   HERMES_INACTIVITY_TIMEOUT_MS,
   HERMES_MAX_ROWS_PER_TICK,
   HERMES_POLL_INTERVAL_MS,
@@ -15,6 +18,45 @@ export interface HermesPollerOptions {
   resolvePersonaAgent: (personaKey: string) => number | undefined;
   /** Task 10: re-point an existing agent to a new session id. */
   reattachSession: (agentId: number, newSessionId: string) => void;
+  /**
+   * True when a process OTHER than this server holds the Hermes db open (e.g.
+   * QuantBot/Hermes's own agent process) -- evidence that a live-flagged
+   * session is genuinely still running even with no recent message rows.
+   * When present, `bootstrap()` additionally adopts the newest live session
+   * per persona regardless of message age, and `reapEnded()` protects those
+   * sessions from inactivity-based reaping while a holder still exists.
+   * Defaults to `createDefaultHasForeignDbHolders(dbPath)` (a real
+   * `lsof -t <dbPath>` check) when omitted.
+   */
+  hasForeignDbHolders?: () => boolean;
+}
+
+/**
+ * Real `lsof -t <dbPath>` implementation of `hasForeignDbHolders`, used
+ * automatically by HermesPoller when the option is omitted. Exported so
+ * callers can wire it explicitly too. Caches its result for
+ * HERMES_HOLDERS_CACHE_MS since the poller may call it every tick
+ * (HERMES_POLL_INTERVAL_MS = 1s) while any session is process-backed.
+ */
+export function createDefaultHasForeignDbHolders(dbPath: string): () => boolean {
+  let cache: { result: boolean; expiresAt: number } | null = null;
+  return () => {
+    const now = Date.now();
+    if (cache && cache.expiresAt > now) return cache.result;
+    let result = false;
+    try {
+      const out = execFileSync('lsof', ['-t', dbPath], { encoding: 'utf8', timeout: 4000 });
+      result = out
+        .split('\n')
+        .map((line) => parseInt(line.trim(), 10))
+        .filter((pid) => !Number.isNaN(pid))
+        .some((pid) => pid !== process.pid);
+    } catch {
+      result = false; // lsof missing / no holders / db path gone — treat as none
+    }
+    cache = { result, expiresAt: now + HERMES_HOLDERS_CACHE_MS };
+    return result;
+  };
 }
 
 interface SessionRow {
@@ -56,8 +98,16 @@ export class HermesPoller {
   protected cursor = -1; // -1 = first tick pending
   /** Sessions we've announced, with last-activity for inactivity reaping. */
   private readonly known = new Map<string, { lastActivityMs: number }>();
+  /** Session ids confirmed alive by a foreign DB holder process at bootstrap
+   *  (see `bootstrap()`). `reapEnded()` skips inactivity-reaping these while
+   *  `hasForeignDbHolders()` still returns true. */
+  private readonly processBacked = new Set<string>();
+  private readonly hasForeignDbHolders: () => boolean;
 
-  constructor(private readonly opts: HermesPollerOptions) {}
+  constructor(private readonly opts: HermesPollerOptions) {
+    this.hasForeignDbHolders =
+      opts.hasForeignDbHolders ?? createDefaultHasForeignDbHolders(opts.dbPath);
+  }
 
   start(): void {
     if (this.timer) return;
@@ -124,8 +174,12 @@ export class HermesPoller {
       | { m: number }
       | undefined;
     this.cursor = max?.m ?? 0;
+    // ORDER BY started_at DESC: the process-backed pass below relies on this
+    // ordering to pick "newest per persona" via first-seen dedupe.
     const live = db
-      .prepare('SELECT id, source, cwd, ended_at FROM sessions WHERE ended_at IS NULL')
+      .prepare(
+        'SELECT id, source, cwd, ended_at FROM sessions WHERE ended_at IS NULL ORDER BY started_at DESC',
+      )
       .all() as unknown as SessionRow[];
     const cutoffS = (Date.now() - HERMES_ACTIVE_THRESHOLD_MS) / 1000;
     for (const s of live) {
@@ -133,6 +187,29 @@ export class HermesPoller {
         .prepare('SELECT 1 AS x FROM messages WHERE session_id = ? AND timestamp > ? LIMIT 1')
         .get(s.id, cutoffS);
       if (recent) this.announceSession(s);
+    }
+
+    // Process-backed bootstrap: a live-flagged session with no recent message
+    // rows can still be genuinely alive (e.g. between turns, or waiting on a
+    // long tool call) when a foreign process holds the db open. Adopt the
+    // newest session per persona (source+cwd) regardless of message age, and
+    // mark it processBacked so reapEnded() protects it from inactivity-reaping
+    // while the holder still exists.
+    let holders = false;
+    try {
+      holders = this.hasForeignDbHolders();
+    } catch {
+      holders = false;
+    }
+    if (holders) {
+      const seenPersonas = new Set<string>();
+      for (const s of live) {
+        const key = personaKey(s.source, s.cwd);
+        if (seenPersonas.has(key)) continue;
+        seenPersonas.add(key);
+        if (!this.known.has(s.id)) this.announceSession(s);
+        this.processBacked.add(s.id);
+      }
     }
   }
 
@@ -223,6 +300,18 @@ export class HermesPoller {
   private reapEnded(db: DatabaseSync): void {
     if (this.known.size === 0) return;
     const now = Date.now();
+    // Only consult hasForeignDbHolders when it could actually matter (some
+    // session is processBacked) -- the default implementation shells out to
+    // lsof, and the injected fakes in tests don't need to be called every
+    // tick otherwise.
+    let holders = false;
+    if (this.processBacked.size > 0) {
+      try {
+        holders = this.hasForeignDbHolders();
+      } catch {
+        holders = false;
+      }
+    }
     for (const [sessionId, meta] of this.known) {
       const s = db
         .prepare('SELECT ended_at, end_reason FROM sessions WHERE id = ?')
@@ -230,9 +319,15 @@ export class HermesPoller {
         | { ended_at: number | null; end_reason: string | null }
         | undefined;
       const endedInDb = isSessionEnded(s);
-      const inactive = now - meta.lastActivityMs > HERMES_INACTIVITY_TIMEOUT_MS;
+      // Skip INACTIVITY-reap (not ended_at-reap -- an explicit ended_at still
+      // ends it) for processBacked sessions while a foreign holder still
+      // exists. Once the holder disappears, normal inactivity rules resume.
+      const protectedByHolder = this.processBacked.has(sessionId) && holders;
+      const inactive =
+        !protectedByHolder && now - meta.lastActivityMs > HERMES_INACTIVITY_TIMEOUT_MS;
       if (endedInDb || inactive) {
         this.known.delete(sessionId);
+        this.processBacked.delete(sessionId);
         this.opts.onEvent('hermes', {
           hook_event_name: 'SessionEnd',
           session_id: sessionId,
