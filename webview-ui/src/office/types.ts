@@ -227,6 +227,8 @@ export interface Character {
    *  focus. Rendered translucent. Teammates and sub-agents are never headless —
    *  clicking them reaches their lead's / parent's terminal. */
   isHeadless?: boolean;
+  /** Provider that owns this agent ('claude' | 'codex' | 'hermes'). Absent = claude. */
+  provider?: string;
 
   // -- Agent Teams --
   /** Team name this agent belongs to */

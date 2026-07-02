@@ -103,33 +103,43 @@ export function getAuraIntensity(level: number): number {
 }
 
 // ── Provider capabilities (tool taxonomy for rendering decisions) ────────────
-// Populated by the `providerCapabilities` message after `webviewReady`. Modules
-// classifying tools (character animation, subagent creation gate) read from here
-// instead of hardcoding Claude-specific tool names.
-//
-// Seeded with Claude defaults so classification works before — or entirely
-// without — a `providerCapabilities` message (e.g. the Tauri desktop backend
-// does not send one). The message, when it arrives, overrides these.
-const providerCaps: {
-  readingTools: Set<string>;
-  subagentToolNames: Set<string>;
-} = {
-  readingTools: new Set(['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch']),
-  subagentToolNames: new Set(['Task', 'Agent']),
-};
+// Populated per provider by `providerCapabilities` messages after `webviewReady`.
+// Classification uses the union across providers: tool-name collisions across
+// providers are semantically compatible (a "read" tool reads), so a per-agent
+// lookup isn't needed. Seeded with Claude defaults so classification works
+// before — or entirely without — a message (e.g. older servers).
+const providerCapsById = new Map<
+  string,
+  { readingTools: Set<string>; subagentToolNames: Set<string> }
+>([
+  [
+    'claude',
+    {
+      readingTools: new Set(['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch']),
+      subagentToolNames: new Set(['Task', 'Agent']),
+    },
+  ],
+]);
 
 export function setProviderCapabilities(caps: {
+  providerId?: string;
   readingTools: string[];
   subagentToolNames: string[];
 }): void {
-  providerCaps.readingTools = new Set(caps.readingTools);
-  providerCaps.subagentToolNames = new Set(caps.subagentToolNames);
+  providerCapsById.set(caps.providerId ?? 'claude', {
+    readingTools: new Set(caps.readingTools),
+    subagentToolNames: new Set(caps.subagentToolNames),
+  });
 }
 
 export function isReadingToolName(name: string | null | undefined): boolean {
-  return typeof name === 'string' && providerCaps.readingTools.has(name);
+  if (typeof name !== 'string') return false;
+  for (const caps of providerCapsById.values()) if (caps.readingTools.has(name)) return true;
+  return false;
 }
 
 export function isSubagentToolName(name: string | null | undefined): boolean {
-  return typeof name === 'string' && providerCaps.subagentToolNames.has(name);
+  if (typeof name !== 'string') return false;
+  for (const caps of providerCapsById.values()) if (caps.subagentToolNames.has(name)) return true;
+  return false;
 }

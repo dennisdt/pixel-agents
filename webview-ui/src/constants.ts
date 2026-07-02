@@ -337,3 +337,14 @@ export const PET_THUMB_SCALE_MARGIN = 0.85;
 export const EMPTY_SPRITE_THUMBNAIL_BG = '#333';
 /** Maximum string length for a PlacedPet.id (defends against pathologically-long layout entries). */
 export const MAX_PET_ID_LENGTH = 128;
+// ── Provider badges (ToolOverlay) ────────────────────────────
+/** Short label per non-default provider shown under the activity text. */
+export const PROVIDER_BADGE_LABELS: Record<string, string> = {
+  codex: 'CODEX',
+  hermes: 'HERMES',
+};
+export const PROVIDER_BADGE_COLORS: Record<string, string> = {
+  codex: '#7dd3fc',
+  hermes: '#fbbf24',
+};
+export const PROVIDER_BADGE_FALLBACK_COLOR = '#a1a1aa';

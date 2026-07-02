@@ -162,6 +162,8 @@ export function useExtensionMessages(
   // so directoryExp updates can resolve to active characters.
   const directoryExpRef = useRef<Record<string, number>>({});
   const agentCwdsRef = useRef<Record<number, string>>({});
+  // Provider that owns each agent ('codex' | 'hermes' | ...); absent = claude.
+  const agentProvidersRef = useRef<Record<number, string>>({});
 
   // Track whether initial layout has been loaded (ref to avoid re-render)
   const layoutReadyRef = useRef(false);
@@ -213,6 +215,18 @@ export function useExtensionMessages(
       // already loaded — the standalone server sends layoutLoaded *before*
       // existingAgents, so buffering-only would strand restored agents: they'd
       // never reach OfficeState and the office would render no characters.
+      // Fork-side per-agent state that reconcileExistingAgents() doesn't carry:
+      // directory-scoped level and owning provider. Applied on both restore paths.
+      const applyAgentExtras = (id: number) => {
+        const cwd = agentCwdsRef.current[id];
+        if (cwd) syncCharacterLevel(os, id, directoryExpRef.current[cwd] ?? 0);
+        const provider = agentProvidersRef.current[id];
+        if (provider) {
+          const ch = os.characters.get(id);
+          if (ch) ch.provider = provider;
+        }
+      };
+
       const addExistingAgent = (p: {
         id: number;
         palette?: number;
@@ -223,12 +237,12 @@ export function useExtensionMessages(
       }) => {
         os.addAgent(p.id, p.palette, p.hueShift, p.seatId, true, p.folderName);
         if (p.isHeadless) os.setHeadless(p.id, true);
-        const cwd = agentCwdsRef.current[p.id];
-        if (cwd) syncCharacterLevel(os, p.id, directoryExpRef.current[cwd] ?? 0);
+        applyAgentExtras(p.id);
       };
 
       if (msg.type === 'providerCapabilities') {
         setProviderCapabilities({
+          providerId: msg.providerId,
           readingTools: msg.readingTools,
           subagentToolNames: msg.subagentToolNames,
         });
@@ -271,6 +285,7 @@ export function useExtensionMessages(
         const teammateName = msg.teammateName as string | undefined;
         const teammateParentId = msg.parentAgentId as number | undefined;
         const teamName = msg.teamName as string | undefined;
+        const provider = msg.provider as string | undefined;
         setAgents((prev) => (prev.includes(id) ? prev : [...prev, id]));
         // Don't auto-select teammates (keep focus on lead)
         if (!isTeammate) {
@@ -309,6 +324,10 @@ export function useExtensionMessages(
             os.setHeadless(id, true);
           }
         }
+        if (provider) {
+          const ch = os.characters.get(id);
+          if (ch) ch.provider = provider;
+        }
         if (cwd) {
           agentCwdsRef.current[id] = cwd;
           syncCharacterLevel(os, id, directoryExpRef.current[cwd] ?? 0);
@@ -346,6 +365,10 @@ export function useExtensionMessages(
         const incoming = msg.agents as number[];
         const meta = (msg.agentMeta || {}) as Record<number, ExistingAgentMeta>;
         const folderNames = (msg.folderNames || {}) as Record<number, string>;
+        const providers = (msg.providers || {}) as Record<number, string>;
+        for (const [idStr, provider] of Object.entries(providers)) {
+          if (provider) agentProvidersRef.current[Number(idStr)] = provider;
+        }
         // Per-agent cwd for directory-scoped leveling (resolved server-side).
         const cwds = (msg.cwds || {}) as Record<number, string>;
         for (const [idStr, cwd] of Object.entries(cwds)) {
@@ -372,10 +395,7 @@ export function useExtensionMessages(
             headlessAgents,
           )
         ) {
-          for (const id of incoming) {
-            const cwd = agentCwdsRef.current[id];
-            if (cwd) syncCharacterLevel(os, id, directoryExpRef.current[cwd] ?? 0);
-          }
+          for (const id of incoming) applyAgentExtras(id);
           saveAgentSeats(os);
         }
         setAgents((prev) => {

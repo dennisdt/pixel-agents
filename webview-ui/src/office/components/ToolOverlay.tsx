@@ -17,6 +17,9 @@ import {
   EXP_BAR_BORDER_COLOR,
   EXP_BAR_FILL_COLOR,
   EXP_BAR_HEIGHT_PX,
+  PROVIDER_BADGE_COLORS,
+  PROVIDER_BADGE_FALLBACK_COLOR,
+  PROVIDER_BADGE_LABELS,
   TEAM_LEAD_COLOR,
   TEAM_ROLE_COLOR,
   TOOL_OVERLAY_VERTICAL_OFFSET,
@@ -204,6 +207,9 @@ export function ToolOverlay({
 
         // Team info
         const teamRoleLabel = ch.isTeamLead ? 'LEAD' : ch.agentName || null;
+        // Claude is the default/majority — badge only non-default providers (restrained).
+        const providerBadge = ch.provider && ch.provider !== 'claude' ? ch.provider : null;
+
         // Sub-agents inherit the parent's leveling implicitly (we don't render theirs).
         // Show the bar even at 0 EXP so leads always have a Lv/title + progress chip.
         const exp = ch.directoryExp ?? 0;
@@ -211,7 +217,7 @@ export function ToolOverlay({
         const { level, progress } = calculateLevel(exp);
         const titleMeta = showLevel ? getTitleForLevel(level) : null;
 
-        const hasExtraLines = !!(ch.folderName || teamRoleLabel || titleMeta);
+        const hasExtraLines = !!(ch.folderName || teamRoleLabel || titleMeta || providerBadge);
 
         // Context gauge. Every agent gets one — lead, teammate, adopted,
         // headless — as soon as it has taken a turn. Sub-agents never do: they
@@ -294,6 +300,17 @@ export function ToolOverlay({
                 {ch.folderName && (
                   <span className="text-2xs leading-none overflow-hidden text-ellipsis block">
                     {ch.folderName}
+                  </span>
+                )}
+                {providerBadge && (
+                  <span
+                    className="text-2xs leading-none overflow-hidden text-ellipsis block"
+                    style={{
+                      color: PROVIDER_BADGE_COLORS[providerBadge] ?? PROVIDER_BADGE_FALLBACK_COLOR,
+                      fontWeight: 'bold',
+                    }}
+                  >
+                    {PROVIDER_BADGE_LABELS[providerBadge] ?? providerBadge.toUpperCase()}
                   </span>
                 )}
               </div>
