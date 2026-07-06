@@ -165,13 +165,14 @@ export class AgentStateStore {
         projectDir: agent.projectDir,
         folderName: agent.folderName,
         provider: agent.providerId,
-        // NOTE: personaKey continuity (see cli.ts's resolvePersonaAgent) is
-        // intra-run only. restoreExternalAgents skips agents whose jsonlFile
-        // is '' (hooks-only providers, e.g. Hermes), so a persisted persona
-        // has no live agent to reattach to after a server restart. Persisting
-        // it here is still correct (harmless, and future-proofs a restore
-        // path that does reattach) -- cross-restart reattach is a documented
-        // follow-up, not a bug to fix here.
+        // NOTE: personaKey is currently only sent by the Hermes poller (a
+        // fixed 'quantbot' value -- see hermesPoller.ts's announceQuantBot).
+        // restoreExternalAgents skips agents whose jsonlFile is '' (hooks-only
+        // providers, e.g. Hermes), so a persisted persona has no live agent to
+        // reattach to after a server restart. Persisting it here is still
+        // correct (harmless, and future-proofs a restore path that does
+        // reattach) -- cross-restart reattach is a documented follow-up, not a
+        // bug to fix here.
         personaKey: agent.personaKey,
         // Persist the resolved cwd: restore must not depend on re-deriving it
         // from the transcript (readCwdFromJsonl can't parse non-Claude shapes,

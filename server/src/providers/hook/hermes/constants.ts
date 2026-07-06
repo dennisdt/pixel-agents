@@ -4,26 +4,32 @@
  * Hermes has no transcript files and no hooks API. A read-only poller over
  * ~/.hermes/state.db (SQLite WAL) synthesizes Claude-shaped hook envelopes.
  * NEVER open the DB writable: FTS triggers + app-maintained counters.
+ *
+ * Hermes on this machine is single-user, single-agent: the webui, cli, and
+ * a2a/bridge/gateway plumbing are all front-ends onto the SAME agent and
+ * memory. The poller fans ALL of it into ONE synthetic "QuantBot" character
+ * (see HERMES_QUANTBOT_SESSION_ID) rather than minting one office character
+ * per (source, cwd) session context.
  */
 export const HERMES_DB_RELATIVE_PATH = '.hermes/state.db';
 export const HERMES_POLL_INTERVAL_MS = 1000;
-/** At startup, only adopt live sessions with a message newer than this. */
-export const HERMES_ACTIVE_THRESHOLD_MS = 600_000; // 10 minutes
-/** Sessions with no new rows for this long get a synthesized SessionEnd. */
-export const HERMES_INACTIVITY_TIMEOUT_MS = 1_800_000; // 30 minutes
 /** Max message rows consumed per tick (backpressure). */
 export const HERMES_MAX_ROWS_PER_TICK = 500;
-/** Prefix for stable per-persona identifiers derived from a session's `source`
- *  column (`hermes-webui`, `hermes-cli`, ...). Two uses: the display-name
- *  fallback (`folder_hint`) for cwd-less sessions (the Hermes webui runs with
- *  cwd NULL, so there is no directory basename to name the character after),
- *  and the directory-EXP bucket (`exp_bucket`) every hermes session's output
- *  tokens accrue to — stable across session-id rotation and cwd churn, and
- *  stamped on the agent as its cwd so the webview levels by it unchanged. */
-export const HERMES_PERSONA_BUCKET_PREFIX = 'hermes-';
 /** How long to cache the default `hasForeignDbHolders` check's result (an
- *  `lsof -t <dbPath>` shellout). HermesPoller may call it every tick
- *  (HERMES_POLL_INTERVAL_MS = 1s) while any session is process-backed, so an
- *  uncached check would shell out once a second for as long as the session
- *  lives. */
+ *  `lsof -t <dbPath>` shellout). HermesPoller calls it every tick
+ *  (HERMES_POLL_INTERVAL_MS = 1s), so an uncached check would shell out once a
+ *  second for as long as the Hermes stack is up. */
 export const HERMES_HOLDERS_CACHE_MS = 30_000; // 30 seconds
+
+/** Fixed synthetic session id for the single collapsed QuantBot character.
+ *  Stable across Hermes restarts (unlike real session ids, which rotate), so
+ *  the poller re-announces the SAME id when the Hermes stack comes back up
+ *  instead of minting a new character. */
+export const HERMES_QUANTBOT_SESSION_ID = 'hermes-quantbot';
+/** Display name / folder_hint for the collapsed character. One line to change
+ *  later if QuantBot gets renamed. */
+export const HERMES_AGENT_DISPLAY_NAME = 'QuantBot';
+/** Single directory-EXP bucket: every real Hermes session's output-token
+ *  delta (webui, cli, a2a plumbing) pools here, since they're all the same
+ *  agent. */
+export const HERMES_EXP_BUCKET = 'hermes';

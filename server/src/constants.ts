@@ -31,8 +31,8 @@ export const EXTERNAL_STALE_CHECK_INTERVAL_MS = 30_000;
  *  (scanExternalDir, startProcessScan) -- a non-primary provider has no such
  *  pairing here, and its transcript can go quiet between turns even while the
  *  session is alive (e.g. a Codex rollout file gets no writes while the user
- *  is composing). 30 minutes matches HERMES_INACTIVITY_TIMEOUT_MS's order so
- *  a live-but-idle session isn't reaped mid-conversation. */
+ *  is composing). 30 minutes gives a live-but-idle session room to breathe
+ *  without being reaped mid-conversation. */
 export const NON_PRIMARY_STALE_TIMEOUT_MS = 1_800_000; // 30 minutes
 /** Cooldown after user closes an agent via X. Must be > EXTERNAL_ACTIVE_THRESHOLD_MS
  *  so the file's mtime becomes stale before the dismissal expires. */

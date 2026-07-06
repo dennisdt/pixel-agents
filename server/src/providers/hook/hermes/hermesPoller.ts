@@ -4,47 +4,38 @@ import { execFileSync } from 'child_process';
 
 import { creditDirectoryTokens } from '../../../directoryStats.js';
 import {
-  HERMES_ACTIVE_THRESHOLD_MS,
+  HERMES_AGENT_DISPLAY_NAME,
+  HERMES_EXP_BUCKET,
   HERMES_HOLDERS_CACHE_MS,
-  HERMES_INACTIVITY_TIMEOUT_MS,
   HERMES_MAX_ROWS_PER_TICK,
-  HERMES_PERSONA_BUCKET_PREFIX,
   HERMES_POLL_INTERVAL_MS,
+  HERMES_QUANTBOT_SESSION_ID,
 } from './constants.js';
 
 export interface HermesPollerOptions {
   dbPath: string;
   /** Feed a synthesized Claude-shaped envelope into runtime.handleHookEvent. */
   onEvent: (providerId: 'hermes', envelope: Record<string, unknown>) => void;
-  /** Task 10: find an existing agent id for a persona key, or undefined. */
-  resolvePersonaAgent: (personaKey: string) => number | undefined;
-  /** Task 10: re-point an existing agent to a new session id. */
-  reattachSession: (agentId: number, newSessionId: string) => void;
-  /** Called after an output-token delta is credited to a persona bucket via
-   *  directoryStats. Wire to a `directoryExp` broadcast so the webview levels
-   *  hermes characters live. (No `agentTokenUsage` counterpart: that message
-   *  is keyed by agent id, which the poller doesn't know — directoryExp is
-   *  what drives leveling.) */
-  onDirectoryExp?: (directory: string, totalExp: number) => void;
   /**
    * True when a process OTHER than this server holds the Hermes db open (e.g.
-   * QuantBot/Hermes's own agent process) -- evidence that a live-flagged
-   * session is genuinely still running even with no recent message rows.
-   * When present, `bootstrap()` additionally adopts the newest live session
-   * per persona regardless of message age, and `reapEnded()` protects those
-   * sessions from inactivity-based reaping while a holder still exists.
-   * Defaults to `createDefaultHasForeignDbHolders(dbPath)` (a real
-   * `lsof -t <dbPath>` check) when omitted.
+   * QuantBot/Hermes's own agent process). This is the SOLE liveness signal
+   * for the single synthetic QuantBot character (see the class doc comment)
+   * -- never `sessions.ended_at`, which Hermes almost never sets.
    */
-  hasForeignDbHolders?: () => boolean;
+  hasForeignDbHolders: () => boolean;
+  /** Called after an output-token delta is credited to HERMES_EXP_BUCKET via
+   *  directoryStats. Wire to a `directoryExp` broadcast so the webview levels
+   *  QuantBot live. (No `agentTokenUsage` counterpart: that message is keyed
+   *  by agent id, which the poller doesn't know — directoryExp is what drives
+   *  leveling.) */
+  onDirectoryExp?: (directory: string, totalExp: number) => void;
 }
 
 /**
- * Real `lsof -t <dbPath>` implementation of `hasForeignDbHolders`, used
- * automatically by HermesPoller when the option is omitted. Exported so
- * callers can wire it explicitly too. Caches its result for
- * HERMES_HOLDERS_CACHE_MS since the poller may call it every tick
- * (HERMES_POLL_INTERVAL_MS = 1s) while any session is process-backed.
+ * Real `lsof -t <dbPath>` implementation of `hasForeignDbHolders`. Exported so
+ * callers (cli.ts) can wire it explicitly. Caches its result for
+ * HERMES_HOLDERS_CACHE_MS since the poller calls it every tick
+ * (HERMES_POLL_INTERVAL_MS = 1s) for as long as the Hermes stack is up.
  */
 export function createDefaultHasForeignDbHolders(dbPath: string): () => boolean {
   let cache: { result: boolean; expiresAt: number } | null = null;
@@ -67,12 +58,6 @@ export function createDefaultHasForeignDbHolders(dbPath: string): () => boolean 
   };
 }
 
-interface SessionRow {
-  id: string;
-  source: string;
-  cwd: string | null;
-  ended_at: number | null;
-}
 // Exported so a test subclass can type-check a `processRow` override (see
 // hermesPoller.test.ts's row-failure seam).
 export interface MessageRow {
@@ -86,45 +71,39 @@ export interface MessageRow {
   timestamp: number;
 }
 
-export function personaKey(source: string, cwd: string | null): string {
-  return `${source}:${cwd ?? ''}`;
-}
-
-/** True when the sessions row has a persisted end (checked via `!== null &&
- *  !== undefined` rather than `!=` for eqeqeq compliance). Shared by
- *  `ensureSession` (skip announcing already-ended sessions) and `reapEnded`
- *  (detect newly-ended sessions). */
-function isSessionEnded(row: { ended_at: number | null } | undefined): boolean {
-  return row?.ended_at !== null && row?.ended_at !== undefined;
-}
-
+/**
+ * Fan-in aggregator over ~/.hermes/state.db. Hermes on this machine is
+ * single-user, single-agent: the webui, cli, and a2a/bridge/gateway plumbing
+ * are all front-ends onto the SAME agent and memory. Rather than minting one
+ * office character per (source, cwd) session context, this poller presents
+ * ALL of it as ONE synthetic "QuantBot" character (HERMES_QUANTBOT_SESSION_ID).
+ *
+ * Existence is gated purely on `hasForeignDbHolders()`. Every envelope emitted
+ * for a real message row has its `session_id` rewritten to the synthetic id,
+ * so tool/turn activity from any real session animates the single character.
+ * Real session ids are still tracked internally (see `sessionOutputTokens`)
+ * purely for output-token EXP crediting, which pools into one bucket.
+ */
 export class HermesPoller {
   private db: DatabaseSync | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   // `protected` (not `private`) so a test subclass can assert cursor position
   // around a simulated row-processing failure (see hermesPoller.test.ts).
   protected cursor = -1; // -1 = first tick pending
-  /** Sessions we've announced: last-activity for inactivity reaping, the EXP
-   *  persona bucket, and the last-seen CUMULATIVE sessions.output_tokens
-   *  (null = baseline pending; the first observation never credits). */
-  private readonly known = new Map<
-    string,
-    { lastActivityMs: number; bucket: string; lastOutputTokens: number | null }
-  >();
-  /** False once the extended reapEnded query fails: older hermes DBs predate
-   *  the sessions.output_tokens column, and retrying the failing prepare every
-   *  tick would drop the connection forever (tick's outer catch). */
+  /** Per real Hermes session that has produced a row since boot: last-seen
+   *  CUMULATIVE sessions.output_tokens (null = baseline pending; the first
+   *  observation never credits). All sessions pool into the single
+   *  HERMES_EXP_BUCKET, since they're all the same QuantBot agent. */
+  private readonly sessionOutputTokens = new Map<string, number | null>();
+  /** False once an output_tokens query fails: older hermes DBs predate the
+   *  column, and retrying the failing prepare every tick would be wasted work. */
   private hasOutputTokensColumn = true;
-  /** Session ids confirmed alive by a foreign DB holder process at bootstrap
-   *  (see `bootstrap()`). `reapEnded()` skips inactivity-reaping these while
-   *  `hasForeignDbHolders()` still returns true. */
-  private readonly processBacked = new Set<string>();
-  private readonly hasForeignDbHolders: () => boolean;
+  /** Mirrors the last-seen `hasForeignDbHolders()` result, so tick() can
+   *  detect a present<->absent transition and emit SessionStart/SessionEnd
+   *  exactly once per flip. */
+  private holdersPresent = false;
 
-  constructor(private readonly opts: HermesPollerOptions) {
-    this.hasForeignDbHolders =
-      opts.hasForeignDbHolders ?? createDefaultHasForeignDbHolders(opts.dbPath);
-  }
+  constructor(private readonly opts: HermesPollerOptions) {}
 
   start(): void {
     if (this.timer) return;
@@ -150,15 +129,16 @@ export class HermesPoller {
   }
 
   tick(): void {
-    let db: DatabaseSync | null;
     try {
-      db = this.open();
+      const db = this.open();
       if (!db) return;
 
       if (this.cursor === -1) {
         this.bootstrap(db);
         return;
       }
+
+      this.updateLiveness();
 
       const rows = db
         .prepare(
@@ -173,11 +153,11 @@ export class HermesPoller {
         // recording this row's id, so a retried tick re-reads and reprocesses it
         // instead of permanently skipping it. Rows already advanced past are not
         // re-emitted since the query is `id > cursor`.
-        this.processRow(db, row);
+        this.processRow(row);
         this.cursor = row.id;
       }
 
-      this.reapEnded(db);
+      this.creditExp(db);
     } catch {
       // Read failure (WAL checkpoint race, etc.) — drop the connection and retry.
       this.db?.close();
@@ -185,112 +165,68 @@ export class HermesPoller {
     }
   }
 
-  /** First tick: cursor to MAX(id) (never replay history), adopt live+recent sessions. */
+  /** First tick: cursor to MAX(id) (never replay history), then announce
+   *  QuantBot once if the Hermes stack is already up. */
   private bootstrap(db: DatabaseSync): void {
     const max = db.prepare('SELECT COALESCE(MAX(id), 0) AS m FROM messages').get() as
       { m: number } | undefined;
     this.cursor = max?.m ?? 0;
-    // ORDER BY started_at DESC: the process-backed pass below relies on this
-    // ordering to pick "newest per persona" via first-seen dedupe.
-    const live = db
-      .prepare(
-        'SELECT id, source, cwd, ended_at FROM sessions WHERE ended_at IS NULL ORDER BY started_at DESC',
-      )
-      .all() as unknown as SessionRow[];
-    const cutoffS = (Date.now() - HERMES_ACTIVE_THRESHOLD_MS) / 1000;
-    for (const s of live) {
-      const recent = db
-        .prepare('SELECT 1 AS x FROM messages WHERE session_id = ? AND timestamp > ? LIMIT 1')
-        .get(s.id, cutoffS);
-      if (recent) this.announceSession(s);
-    }
 
-    // Process-backed bootstrap: a live-flagged session with no recent message
-    // rows can still be genuinely alive (e.g. between turns, or waiting on a
-    // long tool call) when a foreign process holds the db open. Adopt the
-    // newest session per persona (source+cwd) regardless of message age, and
-    // mark it processBacked so reapEnded() protects it from inactivity-reaping
-    // while the holder still exists.
-    let holders = false;
+    this.holdersPresent = this.safeHasForeignDbHolders();
+    if (this.holdersPresent) this.announceQuantBot();
+  }
+
+  private safeHasForeignDbHolders(): boolean {
     try {
-      holders = this.hasForeignDbHolders();
+      return this.opts.hasForeignDbHolders();
     } catch {
-      holders = false;
+      return false;
     }
+  }
+
+  /** Detect a present<->absent flip in `hasForeignDbHolders()` since the last
+   *  tick. QuantBot despawns (SessionEnd) when the Hermes stack stops, and
+   *  re-announces (SessionStart) when it comes back -- idempotent, since the
+   *  handler no-ops a SessionStart for an already-known session id. */
+  private updateLiveness(): void {
+    const holders = this.safeHasForeignDbHolders();
+    if (holders === this.holdersPresent) return;
+    this.holdersPresent = holders;
     if (holders) {
-      const seenPersonas = new Set<string>();
-      for (const s of live) {
-        const key = personaKey(s.source, s.cwd);
-        if (seenPersonas.has(key)) continue;
-        seenPersonas.add(key);
-        if (!this.known.has(s.id)) this.announceSession(s);
-        this.processBacked.add(s.id);
-      }
+      this.announceQuantBot();
+    } else {
+      this.opts.onEvent('hermes', {
+        hook_event_name: 'SessionEnd',
+        session_id: HERMES_QUANTBOT_SESSION_ID,
+      });
     }
+  }
+
+  private announceQuantBot(): void {
+    this.opts.onEvent('hermes', {
+      hook_event_name: 'SessionStart',
+      session_id: HERMES_QUANTBOT_SESSION_ID,
+      source: 'external',
+      confirmed: true,
+      persona_key: 'quantbot',
+      folder_hint: HERMES_AGENT_DISPLAY_NAME,
+      exp_bucket: HERMES_EXP_BUCKET,
+    });
   }
 
   /**
-   * Process one message row: announce its session if unseen, emit the row's
-   * synthesized event(s), and refresh the session's last-activity timestamp.
-   * `protected` (not `private`) so a test subclass can override it to force a
-   * failure on a specific row and verify `tick()`'s cursor-integrity behavior
-   * without needing to corrupt the DB mid-read (see hermesPoller.test.ts).
+   * Process one message row: register its real session for output-token EXP
+   * tracking (if unseen since boot) and emit the row's synthesized event(s),
+   * fanned into the single QuantBot session id. `protected` (not `private`)
+   * so a test subclass can override it to force a failure on a specific row
+   * and verify `tick()`'s cursor-integrity behavior without needing to
+   * corrupt the DB mid-read (see hermesPoller.test.ts).
    */
-  protected processRow(db: DatabaseSync, row: MessageRow): void {
-    this.ensureSession(db, row.session_id);
-    this.emitForRow(row);
-    const s = this.known.get(row.session_id);
-    if (s) s.lastActivityMs = Date.now();
-  }
-
-  private ensureSession(db: DatabaseSync, sessionId: string): void {
-    if (this.known.has(sessionId)) return;
-    const s = db
-      .prepare('SELECT id, source, cwd, ended_at FROM sessions WHERE id = ?')
-      .get(sessionId) as unknown as SessionRow | undefined;
-    if (!s) return;
-    // Finding 2: trailing message rows can be processed after their session has
-    // already ended (e.g. under HERMES_MAX_ROWS_PER_TICK backpressure, so the
-    // row lags behind the session's ended_at). Announcing here would emit a
-    // spurious SessionStart that reapEnded immediately follows with SessionEnd
-    // in the same tick. Skip entirely: don't add to `known`, don't emit.
-    if (isSessionEnded(s)) return;
-    this.announceSession(s);
-  }
-
-  private announceSession(s: SessionRow): void {
-    this.known.set(s.id, {
-      lastActivityMs: Date.now(),
-      bucket: HERMES_PERSONA_BUCKET_PREFIX + s.source,
-      lastOutputTokens: null,
-    });
-    // Persona continuity (Task 10): reattach to an existing character when the
-    // persona (source+cwd) already has one; otherwise a fresh SessionStart.
-    const existing = this.opts.resolvePersonaAgent(personaKey(s.source, s.cwd));
-    if (existing !== undefined) {
-      this.opts.reattachSession(existing, s.id);
-      return;
+  protected processRow(row: MessageRow): void {
+    if (!this.sessionOutputTokens.has(row.session_id)) {
+      this.sessionOutputTokens.set(row.session_id, null);
     }
-    this.opts.onEvent('hermes', {
-      hook_event_name: 'SessionStart',
-      session_id: s.id,
-      source: 'external',
-      cwd: s.cwd ?? undefined,
-      persona_key: personaKey(s.source, s.cwd),
-      // Display-name fallback for cwd-less sessions (the webui runs with cwd
-      // NULL): there is no directory basename to name the character after, so
-      // adoption falls back to the stable persona identifier instead.
-      folder_hint: s.cwd ? undefined : HERMES_PERSONA_BUCKET_PREFIX + s.source,
-      // EXP bucket: hermes EXP accrues to stable persona buckets (never the
-      // raw cwd), and the webview levels characters by their agent.cwd -- so
-      // adoption stamps this on the agent as its cwd.
-      exp_bucket: HERMES_PERSONA_BUCKET_PREFIX + s.source,
-      // Poller-vouched liveness (Wave 4 FIX 8): this session was verified via
-      // DB holders / fresh rows, so the handler adopts it immediately instead
-      // of parking it pending -- an IDLE session never produces the follow-up
-      // event the pending->confirmation filter waits for.
-      confirmed: true,
-    });
+    this.emitForRow(row);
   }
 
   private emitForRow(row: MessageRow): void {
@@ -310,7 +246,7 @@ export class HermesPoller {
         }
         this.opts.onEvent('hermes', {
           hook_event_name: 'PreToolUse',
-          session_id: row.session_id,
+          session_id: HERMES_QUANTBOT_SESSION_ID,
           tool_name: call.function?.name ?? '',
           tool_input: input,
           tool_call_id: call.id,
@@ -320,93 +256,54 @@ export class HermesPoller {
     if (row.role === 'tool') {
       this.opts.onEvent('hermes', {
         hook_event_name: 'PostToolUse',
-        session_id: row.session_id,
+        session_id: HERMES_QUANTBOT_SESSION_ID,
         tool_call_id: row.tool_call_id ?? undefined,
       });
     }
     if (row.role === 'assistant' && row.finish_reason === 'stop') {
-      this.opts.onEvent('hermes', { hook_event_name: 'Stop', session_id: row.session_id });
+      this.opts.onEvent('hermes', {
+        hook_event_name: 'Stop',
+        session_id: HERMES_QUANTBOT_SESSION_ID,
+      });
     }
   }
 
-  /** Per-session reapEnded query, extended with the CUMULATIVE output_tokens
-   *  counter for EXP crediting. Falls back to the legacy column set once if
-   *  the schema predates output_tokens (older hermes) -- without the fallback,
-   *  the failing prepare would throw out of every tick and reaping would stop. */
-  private readSessionEndRow(
-    db: DatabaseSync,
-    sessionId: string,
-  ):
-    | { ended_at: number | null; end_reason: string | null; output_tokens?: number | null }
-    | undefined {
-    if (this.hasOutputTokensColumn) {
-      try {
-        return db
-          .prepare('SELECT ended_at, end_reason, output_tokens FROM sessions WHERE id = ?')
-          .get(sessionId) as unknown as
-          | { ended_at: number | null; end_reason: string | null; output_tokens: number | null }
-          | undefined;
-      } catch {
-        this.hasOutputTokensColumn = false;
-      }
+  /** Defensive read of a real session's CUMULATIVE output_tokens counter.
+   *  Returns null once the column is confirmed absent (older hermes DBs) so a
+   *  permanently-failing prepare isn't retried every tick. */
+  private readOutputTokens(db: DatabaseSync, sessionId: string): number | null {
+    if (!this.hasOutputTokensColumn) return null;
+    try {
+      const row = db.prepare('SELECT output_tokens FROM sessions WHERE id = ?').get(sessionId) as
+        { output_tokens: number | null } | undefined;
+      const tokens = row?.output_tokens;
+      return typeof tokens === 'number' && Number.isFinite(tokens) ? tokens : null;
+    } catch {
+      this.hasOutputTokensColumn = false;
+      return null;
     }
-    return db
-      .prepare('SELECT ended_at, end_reason FROM sessions WHERE id = ?')
-      .get(sessionId) as unknown as
-      { ended_at: number | null; end_reason: string | null } | undefined;
   }
 
-  /** SessionEnd for rows with ended_at set, plus inactivity timeout. */
-  private reapEnded(db: DatabaseSync): void {
-    if (this.known.size === 0) return;
-    const now = Date.now();
-    // Only consult hasForeignDbHolders when it could actually matter (some
-    // session is processBacked) -- the default implementation shells out to
-    // lsof, and the injected fakes in tests don't need to be called every
-    // tick otherwise.
-    let holders = false;
-    if (this.processBacked.size > 0) {
-      try {
-        holders = this.hasForeignDbHolders();
-      } catch {
-        holders = false;
+  /**
+   * Output-token EXP: sessions.output_tokens is CUMULATIVE per real session.
+   * First observation of a session is a baseline (never credited); growth
+   * credits the delta to the single HERMES_EXP_BUCKET (all real sessions pool
+   * together -- they're all QuantBot); a backward reset (e.g. session
+   * restart) re-baselines without a negative credit.
+   */
+  private creditExp(db: DatabaseSync): void {
+    for (const [sessionId, lastTokens] of this.sessionOutputTokens) {
+      const tokens = this.readOutputTokens(db, sessionId);
+      if (tokens === null) continue;
+      if (lastTokens === null || tokens < lastTokens) {
+        this.sessionOutputTokens.set(sessionId, tokens);
+        continue;
       }
-    }
-    for (const [sessionId, meta] of this.known) {
-      const s = this.readSessionEndRow(db, sessionId);
-
-      // Output-token EXP: sessions.output_tokens is CUMULATIVE. First
-      // observation is a baseline (never credited); growth credits the delta
-      // to the persona bucket; a backward reset re-baselines without a
-      // negative credit. Runs before the reap decision so a final burst on a
-      // just-ended session still credits.
-      const tokens = s?.output_tokens;
-      if (typeof tokens === 'number' && Number.isFinite(tokens)) {
-        if (meta.lastOutputTokens === null || tokens < meta.lastOutputTokens) {
-          meta.lastOutputTokens = tokens;
-        } else if (tokens > meta.lastOutputTokens) {
-          const delta = tokens - meta.lastOutputTokens;
-          meta.lastOutputTokens = tokens;
-          const totalExp = creditDirectoryTokens(meta.bucket, delta);
-          this.opts.onDirectoryExp?.(meta.bucket, totalExp);
-        }
-      }
-
-      const endedInDb = isSessionEnded(s);
-      // Skip INACTIVITY-reap (not ended_at-reap -- an explicit ended_at still
-      // ends it) for processBacked sessions while a foreign holder still
-      // exists. Once the holder disappears, normal inactivity rules resume.
-      const protectedByHolder = this.processBacked.has(sessionId) && holders;
-      const inactive =
-        !protectedByHolder && now - meta.lastActivityMs > HERMES_INACTIVITY_TIMEOUT_MS;
-      if (endedInDb || inactive) {
-        this.known.delete(sessionId);
-        this.processBacked.delete(sessionId);
-        this.opts.onEvent('hermes', {
-          hook_event_name: 'SessionEnd',
-          session_id: sessionId,
-          reason: endedInDb ? (s?.end_reason ?? 'ended') : 'stale',
-        });
+      if (tokens > lastTokens) {
+        const delta = tokens - lastTokens;
+        this.sessionOutputTokens.set(sessionId, tokens);
+        const totalExp = creditDirectoryTokens(HERMES_EXP_BUCKET, delta);
+        this.opts.onDirectoryExp?.(HERMES_EXP_BUCKET, totalExp);
       }
     }
   }

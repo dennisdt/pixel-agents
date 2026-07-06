@@ -30,6 +30,7 @@ import {
   claudeProvider,
   codexProvider,
   copyHookScript,
+  createDefaultHasForeignDbHolders,
   HermesPoller,
   hermesProvider,
 } from './providers/index.js';
@@ -243,26 +244,14 @@ async function main(): Promise<void> {
     // LOCAL-ONLY: hermes state.db poller (config-gated, default off)
     let hermesPoller: HermesPoller | null = null;
     if (adapter.getSetting('pixel-agents.hermesEnabled', false)) {
+      const hermesDbPath = path.join(os.homedir(), HERMES_DB_RELATIVE_PATH);
       hermesPoller = new HermesPoller({
-        dbPath: path.join(os.homedir(), HERMES_DB_RELATIVE_PATH),
+        dbPath: hermesDbPath,
         onEvent: (providerId, envelope) => runtime.handleHookEvent(providerId, envelope),
-        // NOTE: only searches the LIVE in-memory store, so persona continuity
-        // is intra-run -- a rotating Hermes session id reattaches to its
-        // existing character within this server process, but not across a
-        // server restart. restoreExternalAgents skips hooks-only agents
-        // (jsonlFile === '', which is every Hermes agent), so no persisted
-        // persona is ever present here to match against after a restart.
-        // Cross-restart reattach is a documented follow-up, not implemented.
-        resolvePersonaAgent: (key) => {
-          for (const [id, agent] of store) {
-            if (agent.providerId === 'hermes' && agent.personaKey === key) return id;
-          }
-          return undefined;
-        },
-        reattachSession: (agentId, sessionId) => runtime.reattachSession(agentId, sessionId),
-        // Output-token EXP: the poller credits deltas to persona buckets via
-        // directoryStats; this pushes the new total to the webview so hermes
-        // characters level live (they carry the bucket as their cwd).
+        hasForeignDbHolders: createDefaultHasForeignDbHolders(hermesDbPath),
+        // Output-token EXP: the poller credits deltas to the single hermes
+        // bucket via directoryStats; this pushes the new total to the webview
+        // so QuantBot levels live (it carries the bucket as its cwd).
         onDirectoryExp: (directory, totalExp) =>
           store.broadcast({ type: 'directoryExp', directory, totalExp }),
       });
