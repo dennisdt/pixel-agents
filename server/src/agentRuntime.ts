@@ -204,7 +204,7 @@ export class AgentRuntime {
         // team. (Newer harnesses run every spawned agent as an independent
         // top-level session that fires its own hooks.)
         if (transcriptPath) {
-          const teamMeta = provider.team?.getTeamMetadataForSession(transcriptPath);
+          const teamMeta = primary.team?.getTeamMetadataForSession(transcriptPath);
           if (teamMeta?.teamName && teamMeta.agentName) {
             for (const [leadId, lead] of this.store) {
               if (lead.teamName !== teamMeta.teamName || lead.leadAgentId !== undefined) continue;

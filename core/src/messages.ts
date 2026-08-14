@@ -56,7 +56,6 @@ export type ClientMessage =
   | SetGhostHeadlessAgents
   | SetHooksEnabled
   | SetHooksInfoShown
-  | SetTheme
   | SetWatchAllSessions
   | ExportLayout
   | ImportLayout
@@ -306,12 +305,9 @@ export interface SettingsLoaded {
   ghostHeadlessAgents: boolean;
   hooksEnabled: boolean;
   hooksInfoShown: boolean;
-  theme: ThemeId;
   externalAssetDirectories: string[];
   showAreas: boolean;
 }
-
-export type ThemeId = 'office' | 'dungeon';
 
 export interface ExternalAssetDirectoriesUpdated {
   type: 'externalAssetDirectoriesUpdated';
@@ -413,11 +409,6 @@ export interface SetHooksEnabled {
 
 export interface SetHooksInfoShown {
   type: 'setHooksInfoShown';
-}
-
-export interface SetTheme {
-  type: 'setTheme';
-  theme: ThemeId;
 }
 
 export interface SetWatchAllSessions {

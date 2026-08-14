@@ -36,12 +36,17 @@ describe('AgentRuntime -- D5 foreign-session gate', () => {
     return path.join(os.tmpdir(), `pxl-d5-test-${crypto.randomUUID()}`);
   }
 
+  /** Claude is a file-based provider, so a SessionStart carrying only a cwd is a
+   *  transient run and is deliberately NOT adopted (it would mint an un-reapable,
+   *  transcript-less agent). These tests exercise the foreign-dir gate, not that
+   *  rule, so they always supply a transcript under the cwd. */
   function fireSessionStartThenStop(sessionId: string, cwd: string): void {
     runtime.handleHookEvent('claude', {
       hook_event_name: 'SessionStart',
       session_id: sessionId,
       source: 'startup',
       cwd,
+      transcript_path: path.join(cwd, `${sessionId}.jsonl`),
     });
     runtime.handleHookEvent('claude', {
       hook_event_name: 'Stop',
@@ -51,7 +56,7 @@ describe('AgentRuntime -- D5 foreign-session gate', () => {
 
   it('drops a foreign session (unowned dir, watchAllSessions off): no agent created', () => {
     store = new AgentStateStore();
-    runtime = new AgentRuntime(store, claudeProvider);
+    runtime = new AgentRuntime(store, [claudeProvider]);
     // watchAllSessions defaults to false; this dir was never scanned/owned
     // by this instance -- exactly the "other server's session" scenario
     // fan-out introduces.
@@ -61,7 +66,7 @@ describe('AgentRuntime -- D5 foreign-session gate', () => {
 
   it('adopts a foreign session when watchAllSessions is on', () => {
     store = new AgentStateStore();
-    runtime = new AgentRuntime(store, claudeProvider);
+    runtime = new AgentRuntime(store, [claudeProvider]);
     runtime.watchAllSessions.current = true;
     fireSessionStartThenStop('d5-foreign-on', untrackedDir());
     expect(store.size).toBe(1);
@@ -69,7 +74,7 @@ describe('AgentRuntime -- D5 foreign-session gate', () => {
 
   it('adopts a session under a project dir this instance has scanned, even with watchAllSessions off', () => {
     store = new AgentStateStore();
-    runtime = new AgentRuntime(store, claudeProvider);
+    runtime = new AgentRuntime(store, [claudeProvider]);
     const dir = untrackedDir();
     runtime.startProjectScan(dir); // marks `dir` as owned/tracked
     fireSessionStartThenStop('d5-tracked-dir', dir);
