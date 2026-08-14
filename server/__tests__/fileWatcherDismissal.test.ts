@@ -15,9 +15,24 @@ vi.mock('vscode', () => ({
 }));
 
 import { AgentStateStore } from '../src/agentStateStore.js';
-import { DISMISSED_COOLDOWN_MS, EXTERNAL_ACTIVE_THRESHOLD_MS } from '../src/constants.js';
+import {
+  DISMISSED_COOLDOWN_MS,
+  EXTERNAL_ACTIVE_THRESHOLD_MS,
+  EXTERNAL_SCAN_INTERVAL_MS,
+} from '../src/constants.js';
 import { DismissalTracker } from '../src/dismissalTracker.js';
-import { scanExternalDir, scanForNewJsonlFiles, setDismissalTracker } from '../src/fileWatcher.js';
+import {
+  adoptExternalSessionFromHook,
+  ensureProjectScan,
+  scanExternalDir,
+  scanForNewJsonlFiles,
+  setDismissalTracker,
+  setTeamProvider,
+  startExternalSessionScanning,
+} from '../src/fileWatcher.js';
+import { PathSet } from '../src/pathKey.js';
+import { claudeTeamProvider } from '../src/providers/hook/claude/claudeTeamProvider.js';
+import type { AgentState } from '../src/types.js';
 
 /**
  * Tests for the DismissalTracker integration with fileWatcher's scanner functions.
@@ -30,7 +45,9 @@ describe('fileWatcher dismissal state', () => {
   let tmpDir: string;
   let projectDir: string;
   let tracker: DismissalTracker;
-  let knownJsonlFiles: Set<string>;
+  // PathSet, not Set — mirrors AgentRuntime.knownJsonlFiles so the case-varied
+  // path cases below exercise the real membership semantics.
+  let knownJsonlFiles: PathSet;
   let nextAgentIdRef: { current: number };
   let agents: AgentStateStore;
   let fileWatchers: Map<number, fs.FSWatcher>;
@@ -44,7 +61,7 @@ describe('fileWatcher dismissal state', () => {
     return filePath;
   }
 
-  function runExternalScan(): void {
+  function runExternalScan(hooksEnabled = false): void {
     scanExternalDir(
       projectDir,
       knownJsonlFiles,
@@ -55,6 +72,7 @@ describe('fileWatcher dismissal state', () => {
       waitingTimers,
       permissionTimers,
       () => {},
+      { current: hooksEnabled },
     );
   }
 
@@ -65,7 +83,7 @@ describe('fileWatcher dismissal state', () => {
     tracker = new DismissalTracker();
     setDismissalTracker(tracker);
 
-    knownJsonlFiles = new Set();
+    knownJsonlFiles = new PathSet();
     nextAgentIdRef = { current: 1 };
     agents = new AgentStateStore();
     fileWatchers = new Map();
@@ -273,6 +291,238 @@ describe('fileWatcher dismissal state', () => {
       // No active-terminal agent is present, so adoption shouldn't fire regardless.
       // Primarily: dismissal entry should NOT get erased by this pass.
       expect(tracker.isDismissed(file)).toBe(true);
+    });
+  });
+
+  describe('scanExternalDir: team session ownership', () => {
+    it('leaves a tracked lead’s teammate session to team discovery', () => {
+      // Newer harnesses run each spawned agent as its own top-level session in
+      // the LEAD's projectDir, so this scan sees it too. Generic adoption here
+      // would strip the teammate identity (no leadAgentId, and a seat picked by
+      // findFreeSeat rather than the seat closest to its lead), and since
+      // workspace polling runs under hooks it can beat the hook-driven attach.
+      setTeamProvider(claudeTeamProvider);
+      try {
+        const teamName = 'session-abc12345';
+        const leadFile = writeJsonlFile('lead.jsonl', '{"type":"assistant"}\n');
+        knownJsonlFiles.add(leadFile);
+        nextAgentIdRef.current = 50;
+        agents.set(1, {
+          id: 1,
+          jsonlFile: leadFile,
+          projectDir,
+          isExternal: false,
+          teamName,
+        } as AgentState);
+
+        writeJsonlFile(
+          'aaaaaaaa-1111-4111-8111-e2e000000001.jsonl',
+          `${JSON.stringify({ type: 'system', teamName, agentName: 'researcher' })}\n`,
+        );
+
+        runExternalScan(true);
+
+        // The teammate transcript must be left for team discovery. Asserted on
+        // the adopted FILES, not the store size: the scanner assigns ids from
+        // nextAgentIdRef, which can collide with a hand-seeded lead and mask an
+        // adoption as an overwrite.
+        const adopted = [...agents.values()].map((a) => path.basename(a.jsonlFile));
+        expect(adopted).toEqual(['lead.jsonl']);
+      } finally {
+        setTeamProvider(null as unknown as Parameters<typeof setTeamProvider>[0]);
+      }
+    });
+
+    it('still adopts a teammate session when hooks are OFF', () => {
+      // Hooks off = no fast-attach, so this scan is the ONLY discovery path for
+      // tmux teammates. Guarding on team tags without checking hooks state broke
+      // the hooks-off matrix specs: the teammate was never adopted at all.
+      setTeamProvider(claudeTeamProvider);
+      try {
+        const teamName = 'session-abc12345';
+        const leadFile = writeJsonlFile('lead.jsonl', '{"type":"assistant"}\n');
+        knownJsonlFiles.add(leadFile);
+        nextAgentIdRef.current = 50;
+        agents.set(1, {
+          id: 1,
+          jsonlFile: leadFile,
+          projectDir,
+          isExternal: false,
+          teamName,
+        } as AgentState);
+
+        writeJsonlFile(
+          'cccccccc-3333-4333-8333-e2e000000003.jsonl',
+          `${JSON.stringify({ type: 'system', teamName, agentName: 'researcher' })}\n`,
+        );
+
+        runExternalScan(false);
+
+        const adopted = [...agents.values()].map((a) => path.basename(a.jsonlFile));
+        expect(adopted).toContain('cccccccc-3333-4333-8333-e2e000000003.jsonl');
+      } finally {
+        setTeamProvider(null as unknown as Parameters<typeof setTeamProvider>[0]);
+      }
+    });
+
+    it('still adopts an orphan team session whose lead is not tracked', () => {
+      setTeamProvider(claudeTeamProvider);
+      try {
+        writeJsonlFile(
+          'bbbbbbbb-2222-4222-8222-e2e000000002.jsonl',
+          `${JSON.stringify({ type: 'system', teamName: 'session-orphan1', agentName: 'stray' })}\n`,
+        );
+
+        runExternalScan(true);
+
+        const adopted = [...agents.values()].map((a) => path.basename(a.jsonlFile));
+        expect(adopted).toEqual(['bbbbbbbb-2222-4222-8222-e2e000000002.jsonl']);
+      } finally {
+        setTeamProvider(null as unknown as Parameters<typeof setTeamProvider>[0]);
+      }
+    });
+  });
+
+  describe('startExternalSessionScanning: hooks mode workspace discovery', () => {
+    it('adopts workspace JSONL sessions when hooks and Watch All Sessions are both enabled', () => {
+      vi.useFakeTimers();
+      const projectScanTimerRef: { current: ReturnType<typeof setInterval> | null } = {
+        current: null,
+      };
+
+      ensureProjectScan(
+        projectDir,
+        knownJsonlFiles,
+        projectScanTimerRef,
+        { current: null },
+        nextAgentIdRef,
+        agents,
+        fileWatchers,
+        pollingTimers,
+        waitingTimers,
+        permissionTimers,
+        () => {},
+        undefined,
+        { current: true },
+      );
+      writeJsonlFile('workspace-session.jsonl', '{"type":"assistant"}\n');
+
+      const externalScanTimer = startExternalSessionScanning(
+        projectDir,
+        knownJsonlFiles,
+        nextAgentIdRef,
+        agents,
+        fileWatchers,
+        pollingTimers,
+        waitingTimers,
+        permissionTimers,
+        new Map(),
+        () => {},
+        { current: true },
+        { current: true },
+      );
+
+      vi.advanceTimersByTime(EXTERNAL_SCAN_INTERVAL_MS);
+
+      clearInterval(externalScanTimer);
+      if (projectScanTimerRef.current) clearInterval(projectScanTimerRef.current);
+      vi.useRealTimers();
+
+      expect(agents.size).toBe(1);
+      const adopted = [...agents.values()][0];
+      expect(adopted.jsonlFile).toBe(path.join(projectDir, 'workspace-session.jsonl'));
+      expect(adopted.isExternal).toBe(true);
+    });
+
+    it('does not steal a replacement transcript while an agent awaits reassignment', () => {
+      const oldFile = writeJsonlFile('old-session.jsonl', '{"type":"assistant"}\n');
+      const replacementFile = writeJsonlFile('replacement-session.jsonl', '{"type":"assistant"}\n');
+      knownJsonlFiles.add(oldFile);
+      agents.set(1, {
+        id: 1,
+        isExternal: false,
+        projectDir,
+        jsonlFile: oldFile,
+        pendingClear: true,
+      } as AgentState);
+      nextAgentIdRef.current = 2;
+
+      runExternalScan();
+      expect(agents.size).toBe(1);
+      expect(knownJsonlFiles.has(replacementFile)).toBe(false);
+
+      agents.get(1)!.pendingClear = false;
+      runExternalScan();
+      expect(agents.size).toBe(2);
+      expect(knownJsonlFiles.has(replacementFile)).toBe(true);
+    });
+
+    it('honors a dismissal recorded under a different path spelling', () => {
+      // Windows only: the user closes a hook-adopted agent (Claude's spelling of the
+      // transcript path) and the scanner then rediscovers the same file under VS Code's
+      // spelling. An exact-string dismissal key missed and the file was re-adopted
+      // seconds later, mid-cooldown.
+      const platformSpy = vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      try {
+        const file = writeJsonlFile('closed-session.jsonl', '{"type":"assistant"}\n');
+        tracker.dismiss(file.toUpperCase());
+
+        runExternalScan();
+
+        expect(agents.size).toBe(0);
+        expect(tracker.isDismissed(file)).toBe(true);
+      } finally {
+        platformSpy.mockRestore();
+      }
+    });
+
+    it('treats a case-varied transcript as already known', () => {
+      const platformSpy = vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      try {
+        const file = writeJsonlFile('known-session.jsonl', '{"type":"assistant"}\n');
+        knownJsonlFiles.add(file.toUpperCase());
+
+        runExternalScan();
+
+        expect(agents.size).toBe(0);
+      } finally {
+        platformSpy.mockRestore();
+      }
+    });
+
+    it('deduplicates case-varied transcript paths across hook and polling adoption', () => {
+      const platformSpy = vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      try {
+        const file = writeJsonlFile('workspace-session.jsonl', '{"type":"assistant"}\n');
+        agents.set(1, {
+          id: 1,
+          isExternal: true,
+          projectDir,
+          jsonlFile: file.toUpperCase(),
+        } as AgentState);
+        nextAgentIdRef.current = 2;
+
+        adoptExternalSessionFromHook(
+          'workspace-session',
+          file,
+          projectDir,
+          'claude',
+          knownJsonlFiles,
+          nextAgentIdRef,
+          agents,
+          fileWatchers,
+          pollingTimers,
+          waitingTimers,
+          permissionTimers,
+          () => {},
+        );
+        runExternalScan();
+
+        expect(agents.size).toBe(1);
+        expect(nextAgentIdRef.current).toBe(2);
+      } finally {
+        platformSpy.mockRestore();
+      }
     });
   });
 

@@ -98,20 +98,31 @@ components:
         - $ref: '#/components/schemas/SubagentToolPermission'
         # Agent Teams
         - $ref: '#/components/schemas/AgentTeamInfo'
+        # Context window
+        - $ref: '#/components/schemas/AgentContextUsage'
         - $ref: '#/components/schemas/AgentTokenUsage'
+        # Leveling (directory-scoped EXP)
+        - $ref: '#/components/schemas/AgentCwd'
+        - $ref: '#/components/schemas/DirectoryExp'
+        - $ref: '#/components/schemas/DirectoryExpAll'
         # Layout
         - $ref: '#/components/schemas/LayoutLoaded'
         # Assets
         - $ref: '#/components/schemas/FurnitureAssetsLoaded'
         - $ref: '#/components/schemas/CharacterSpritesLoaded'
+        - $ref: '#/components/schemas/PetSpritesLoaded'
         - $ref: '#/components/schemas/FloorTilesLoaded'
         - $ref: '#/components/schemas/WallTilesLoaded'
+        - $ref: '#/components/schemas/CarpetTilesLoaded'
         # Settings & config
         - $ref: '#/components/schemas/SettingsLoaded'
         - $ref: '#/components/schemas/ExternalAssetDirectoriesUpdated'
+        - $ref: '#/components/schemas/AreaMappingsLoaded'
         - $ref: '#/components/schemas/WorkspaceFolders'
         # Diagnostics
         - $ref: '#/components/schemas/AgentDiagnostics'
+        # Launch-from-web
+        - $ref: '#/components/schemas/RecentProjects'
       discriminator: type
 
     ClientMessage:
@@ -125,6 +136,7 @@ components:
         - $ref: '#/components/schemas/SetSoundEnabled'
         - $ref: '#/components/schemas/SetLastSeenVersion'
         - $ref: '#/components/schemas/SetAlwaysShowLabels'
+        - $ref: '#/components/schemas/SetGhostHeadlessAgents'
         - $ref: '#/components/schemas/SetHooksEnabled'
         - $ref: '#/components/schemas/SetHooksInfoShown'
         - $ref: '#/components/schemas/SetWatchAllSessions'
@@ -133,7 +145,10 @@ components:
         - $ref: '#/components/schemas/OpenSessionsFolder'
         - $ref: '#/components/schemas/AddExternalAssetDirectory'
         - $ref: '#/components/schemas/RemoveExternalAssetDirectory'
+        - $ref: '#/components/schemas/SaveAreaMappings'
+        - $ref: '#/components/schemas/SetShowAreas'
         - $ref: '#/components/schemas/RequestDiagnostics'
+        - $ref: '#/components/schemas/RequestRecentProjects'
       discriminator: type
 
     # ── Server message variants ────────────────────────────────────
@@ -145,10 +160,13 @@ components:
         sub-agent characters.
       type: object
       additionalProperties: false
-      required: [type, readingTools, subagentToolNames]
+      required: [type, providerId, readingTools, subagentToolNames]
       properties:
         type:
           const: providerCapabilities
+        providerId:
+          type: string
+          description: Identifier of the provider these capabilities belong to (e.g. 'claude', 'codex').
         readingTools:
           type: array
           items:
@@ -174,6 +192,18 @@ components:
           type: string
         isExternal:
           type: boolean
+        palette:
+          type: integer
+          description: Server-assigned character palette index.
+        hueShift:
+          type: integer
+          description: Server-assigned hue shift in degrees (0-360).
+        cwd:
+          type: string
+          description: Working directory of the session (keys directory-scoped EXP/leveling).
+        provider:
+          type: string
+          description: Provider that created this agent (absent means 'claude', for back-compat with older servers).
 
     AgentClosed:
       description: An agent has been removed from the office.
@@ -207,6 +237,11 @@ components:
       properties:
         type:
           const: existingAgents
+        cwds:
+          type: object
+          description: Map of agent ID (string) to working directory (for directory-scoped leveling).
+          additionalProperties:
+            type: string
         agents:
           type: array
           items:
@@ -226,6 +261,11 @@ components:
           description: Map of agent ID (string) to external flag.
           additionalProperties:
             type: boolean
+        providers:
+          type: object
+          description: Map of agent ID (string) to provider ID (e.g. 'claude', 'codex').
+          additionalProperties:
+            type: string
 
     AgentStatus:
       description: Active vs waiting state for an agent (drives character animation).
@@ -239,6 +279,12 @@ components:
           type: integer
         status:
           $ref: '#/components/schemas/AgentActivityStatus'
+        awaitingInput:
+          type: boolean
+          description: >-
+            Only meaningful when status is "waiting". True when the agent went
+            idle waiting on the user (drives the "Waiting for input" label);
+            absent/false means the agent finished its turn ("Done").
 
     AgentActivityStatus:
       description: Activity state of an agent.
@@ -266,6 +312,12 @@ components:
           type: boolean
         runInBackground:
           type: boolean
+        isTeammateSpawn:
+          type: boolean
+          description: >-
+            True when this spawn tool call carries a name, making the spawn a
+            Teammate-to-be. The office must not create a Subtask sub-character
+            for it — a teammate character will represent the spawn instead.
 
     AgentToolDone:
       description: Agent finished executing a tool.
@@ -407,6 +459,87 @@ components:
         outputTokens:
           type: integer
 
+    AgentContextUsage:
+      description: |
+        How much of the agent's context window is in use, as of its most recent
+        turn. A snapshot, NOT a running total: it falls when the session
+        compacts or clears. `maxContextTokens` is the runtime's best estimate of
+        the window size — transcripts don't state it, so it starts at the
+        default and widens (never shrinks) once a larger context is observed.
+        Sent for every agent, including leads and teammates; sub-agents have no
+        session of their own and never report it.
+      type: object
+      additionalProperties: false
+      required: [type, id, contextTokens, maxContextTokens]
+      properties:
+        type:
+          const: agentContextUsage
+        id:
+          type: integer
+        contextTokens:
+          type: integer
+        maxContextTokens:
+          type: integer
+
+    AgentCwd:
+      description: |
+        The server resolved an agent's working directory (from JSONL `cwd`).
+        Drives directory-scoped leveling: the client maps the agent to this cwd.
+      type: object
+      additionalProperties: false
+      required: [type, id, cwd]
+      properties:
+        type:
+          const: agentCwd
+        id:
+          type: integer
+        cwd:
+          type: string
+
+    DirectoryExp:
+      description: |
+        Updated cumulative EXP (output tokens) for a working directory. The client
+        re-levels any character whose resolved cwd matches `directory`.
+      type: object
+      additionalProperties: false
+      required: [type, directory, totalExp]
+      properties:
+        type:
+          const: directoryExp
+        directory:
+          type: string
+        totalExp:
+          type: integer
+
+    DirectoryExpAll:
+      description: |
+        Snapshot of all directory→EXP totals. Sent on connect so a (re)connecting
+        client can compute levels for already-present agents.
+      type: object
+      additionalProperties: false
+      required: [type, stats]
+      properties:
+        type:
+          const: directoryExpAll
+        stats:
+          type: object
+          description: Map of working directory to cumulative EXP (output tokens).
+          additionalProperties:
+            type: integer
+
+    RecentProjects:
+      description: Recent projects from ~/.claude/projects, for the web launch picker.
+      type: object
+      additionalProperties: false
+      required: [type, projects]
+      properties:
+        type:
+          const: recentProjects
+        projects:
+          type: array
+          items:
+            $ref: '#/components/schemas/RecentProject'
+
     LayoutLoaded:
       description: |
         Office layout (tiles, furniture, colors). `null` when no layout file or
@@ -464,6 +597,77 @@ components:
           items:
             $ref: '#/components/schemas/CharacterSpriteSet'
 
+    PetSpritesLoaded:
+      description: Pet sprite frame sets and display names, sent once after webviewReady (between characterSpritesLoaded and floorTilesLoaded).
+      type: object
+      additionalProperties: false
+      required: [type, pets, petNames]
+      properties:
+        type:
+          const: petSpritesLoaded
+        pets:
+          type: array
+          description: One frame-set per loaded pet, indexed by petType.
+          items:
+            $ref: '#/components/schemas/PetSpriteFrameSet'
+        petNames:
+          type: array
+          description: Display names parallel-indexed to `pets` (sourced from each pet's manifest.json).
+          items:
+            type: string
+
+    PetSpriteFrameSet:
+      description: One pet's frames keyed by direction + state. All arrays are 3D hex-string arrays (frames × rows × pixels).
+      type: object
+      additionalProperties: false
+      required: [walkDown, idleDown, walkUp, idleUp, walkRight]
+      properties:
+        walkDown:
+          type: array
+          description: 3 frames at 16×32 pixels.
+          items:
+            type: array
+            items:
+              type: array
+              items:
+                type: string
+        idleDown:
+          type: array
+          description: 3 frames at 16×32 pixels.
+          items:
+            type: array
+            items:
+              type: array
+              items:
+                type: string
+        walkUp:
+          type: array
+          description: 3 frames at 16×32 pixels.
+          items:
+            type: array
+            items:
+              type: array
+              items:
+                type: string
+        idleUp:
+          type: array
+          description: 3 frames at 16×32 pixels.
+          items:
+            type: array
+            items:
+              type: array
+              items:
+                type: string
+        walkRight:
+          type: array
+          description: 3 frames at 32×32 pixels.
+          items:
+            type: array
+            items:
+              type: array
+              items:
+                type: string
+
     FloorTilesLoaded:
       description: Floor tile sprites (7 patterns).
       type: object
@@ -502,6 +706,26 @@ components:
                 items:
                   type: string
 
+    CarpetTilesLoaded:
+      description: Carpet auto-tile sprite sets (16 marching-squares pieces per variant).
+      type: object
+      additionalProperties: false
+      required: [type, sets]
+      properties:
+        type:
+          const: carpetTilesLoaded
+        sets:
+          type: array
+          description: Array of carpet variants; each variant is an array of 2D hex string arrays.
+          items:
+            type: array
+            items:
+              type: array
+              items:
+                type: array
+                items:
+                  type: string
+
     SettingsLoaded:
       description: All persisted user-level settings, sent once on connect.
       type: object
@@ -513,9 +737,11 @@ components:
         - extensionVersion
         - watchAllSessions
         - alwaysShowLabels
+        - ghostHeadlessAgents
         - hooksEnabled
         - hooksInfoShown
         - externalAssetDirectories
+        - showAreas
       properties:
         type:
           const: settingsLoaded
@@ -529,6 +755,8 @@ components:
           type: boolean
         alwaysShowLabels:
           type: boolean
+        ghostHeadlessAgents:
+          type: boolean
         hooksEnabled:
           type: boolean
         hooksInfoShown:
@@ -537,6 +765,26 @@ components:
           type: array
           items:
             type: string
+        showAreas:
+          type: boolean
+
+    AreaMappingsLoaded:
+      description: |
+        Workspace-folder-to-Area mappings. Folder names map to one or more Area
+        labels; new agents from that folder prefer seats inside those Areas.
+      type: object
+      additionalProperties: false
+      required: [type, mappings]
+      properties:
+        type:
+          const: areaMappingsLoaded
+        mappings:
+          type: object
+          description: Map of folder name (string) to array of Area labels.
+          additionalProperties:
+            type: array
+            items:
+              type: string
 
     ExternalAssetDirectoriesUpdated:
       description: External asset directory list changed (after add/remove).
@@ -681,6 +929,19 @@ components:
         enabled:
           type: boolean
 
+    SetGhostHeadlessAgents:
+      description: >-
+        Toggle translucent rendering for headless agents (adopted sessions with no
+        terminal to focus).
+      type: object
+      additionalProperties: false
+      required: [type, enabled]
+      properties:
+        type:
+          const: setGhostHeadlessAgents
+        enabled:
+          type: boolean
+
     SetHooksEnabled:
       type: object
       additionalProperties: false
@@ -737,13 +998,19 @@ components:
           const: openSessionsFolder
 
     AddExternalAssetDirectory:
-      description: Add an external asset directory (host shows a directory picker).
+      description: >-
+        Add an external asset directory. In VS Code the host shows a native
+        directory picker and omits `path`; the standalone browser has no native
+        picker, so it supplies an absolute `path` typed by the user.
       type: object
       additionalProperties: false
       required: [type]
       properties:
         type:
           const: addExternalAssetDirectory
+        path:
+          type: string
+          description: Absolute directory path (standalone browser only; omitted in VS Code).
 
     RemoveExternalAssetDirectory:
       description: Remove an external asset directory by path.
@@ -756,6 +1023,32 @@ components:
         path:
           type: string
 
+    SaveAreaMappings:
+      description: Persist folder-to-Area mappings for seat assignment.
+      type: object
+      additionalProperties: false
+      required: [type, mappings]
+      properties:
+        type:
+          const: saveAreaMappings
+        mappings:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+
+    SetShowAreas:
+      description: Toggle the Areas overlay (translucent rendering on top of the office).
+      type: object
+      additionalProperties: false
+      required: [type, enabled]
+      properties:
+        type:
+          const: setShowAreas
+        enabled:
+          type: boolean
+
     RequestDiagnostics:
       description: Request agent connection diagnostics (server responds with agentDiagnostics).
       type: object
@@ -765,7 +1058,30 @@ components:
         type:
           const: requestDiagnostics
 
+    RequestRecentProjects:
+      description: Request the recent-projects list (server responds with recentProjects).
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        type:
+          const: requestRecentProjects
+
     # ── Supporting schemas ─────────────────────────────────────────
+
+    RecentProject:
+      type: object
+      additionalProperties: false
+      required: [hash, displayName, lastUsed]
+      properties:
+        hash:
+          type: string
+        displayName:
+          type: string
+        fullPath:
+          type: [string, 'null']
+        lastUsed:
+          type: integer
 
     AgentSeatMeta:
       description: |

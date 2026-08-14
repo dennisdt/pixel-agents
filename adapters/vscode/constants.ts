@@ -1,4 +1,11 @@
 // ── User-Level Layout Persistence (re-exports from server/) ──
+// The user-level persistence contract, surfaced as one adapter-facing barrel so
+// VS Code code never reaches into server/src/constants.js directly. Only
+// LAYOUT_REVISION_KEY has an adapter consumer today (PixelAgentsViewProvider);
+// the rest travel with it because they describe the same ~/.pixel-agents
+// file layout, and splitting the set would leave the next caller guessing which
+// half to import from where.
+/** @public */
 export {
   CONFIG_FILE_NAME,
   LAYOUT_FILE_DIR,
@@ -11,9 +18,20 @@ export {
 export const GLOBAL_KEY_SOUND_ENABLED = 'pixel-agents.soundEnabled';
 export const GLOBAL_KEY_LAST_SEEN_VERSION = 'pixel-agents.lastSeenVersion';
 export const GLOBAL_KEY_ALWAYS_SHOW_LABELS = 'pixel-agents.alwaysShowLabels';
+export const GLOBAL_KEY_GHOST_HEADLESS_AGENTS = 'pixel-agents.ghostHeadlessAgents';
 export const GLOBAL_KEY_WATCH_ALL_SESSIONS = 'pixel-agents.watchAllSessions';
 export const GLOBAL_KEY_HOOKS_ENABLED = 'pixel-agents.hooksEnabled';
 export const GLOBAL_KEY_HOOKS_INFO_SHOWN = 'pixel-agents.hooksInfoShown';
+export const GLOBAL_KEY_SHOW_AREAS = 'pixel-agents.showAreas';
+
+/**
+ * Folder→Area mappings live inside the shared ~/.pixel-agents/config.json
+ * (vscode.areaMappings), not in VS Code globalState. Kept here as a key
+ * constant for callers that need to reference it symbolically.
+ *
+ * @public
+ */
+export const SETTING_KEY_AREA_MAPPINGS = 'pixel-agents.areaMappings';
 
 // ── VS Code Settings (contributes.configuration keys) ───────
 export const CONFIG_KEY_AUTO_SHOW_PANEL = 'pixel-agents.autoShowPanel';

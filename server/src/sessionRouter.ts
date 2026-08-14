@@ -6,6 +6,17 @@ export interface PendingExternalSession {
   /** Transcript file path. Undefined for providers without transcripts (OpenCode, Copilot). */
   transcriptPath: string | undefined;
   cwd: string;
+  /** Persona continuity key (source+cwd), carried through from the raw envelope's
+   *  `persona_key` field for providers that identify a persistent persona
+   *  independent of the rotating session id (Hermes). */
+  personaKey?: string;
+  /** Display-name fallback for cwd-less sessions, carried through from the raw
+   *  envelope's `folder_hint` field (Hermes webui: cwd NULL, hint 'hermes-webui'). */
+  folderHint?: string;
+  /** Directory-EXP bucket from the raw envelope's `exp_bucket` field (Hermes:
+   *  'hermes-<source>'). Stamped on the agent as its cwd so the webview's
+   *  cwd-keyed leveling works against the stable persona bucket. */
+  expBucket?: string;
 }
 
 /** An event waiting to be dispatched once its agent registers. */

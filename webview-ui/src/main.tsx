@@ -8,7 +8,8 @@ import { isBrowserRuntime } from './runtime';
 
 async function main() {
   // browserMock is for Vite dev mode only (UI prototyping without a server).
-  // In standalone server mode, assets are loaded server-side and sent over WebSocket.
+  // In standalone server (web app) mode, assets are loaded server-side and sent
+  // over the WebSocket; in VS Code they come from the extension.
   if (isBrowserRuntime && import.meta.env.DEV) {
     const { initBrowserMock } = await import('./browserMock.js');
     await initBrowserMock();

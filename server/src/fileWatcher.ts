@@ -3,16 +3,19 @@
  *
  * HOOKS MODE (preferred): Claude Code Hooks API delivers instant, reliable events
  * for session lifecycle (SessionStart, SessionEnd, Stop, PermissionRequest, etc.).
- * When hooks work, heuristic scanners and timers are suppressed. The hookDelivered
- * flag per agent and hooksEnabledRef globally control the switch.
+ * When hooks work, per-agent heuristic timers and terminal adoption scans are
+ * suppressed. The hookDelivered flag per agent and hooksEnabledRef globally
+ * control the switch.
  *
  * HEURISTIC MODE (fallback): For environments without hooks (other providers,
  * hooks disabled, older Claude versions). Uses:
  * - Per-agent 500ms JSONL polling for tool activity and /clear detection
  * - 1s main scanner for terminal adoption
- * - 3s external scanner for external session detection
  * - 30s stale check for orphaned external agents
  * - Multiple dismissal systems to prevent re-adoption races
+ *
+ * EXTERNAL SESSION DISCOVERY: The 3s external scanner runs in both hooks and
+ * heuristic modes because not every JSONL producer emits Claude Code hooks.
  *
  * JSONL POLLING (always active): readNewLines + processTranscriptLine run in both
  * modes. They provide tool content (status text, animations) that hooks don't carry.
@@ -30,17 +33,24 @@ import type { ITerminalAdapter } from '../../core/src/terminalAdapter.js';
 import type { AgentStateStore } from './agentStateStore.js';
 import {
   CLEAR_IDLE_THRESHOLD_MS,
+  DEFAULT_MAX_CONTEXT_TOKENS,
   EXTERNAL_ACTIVE_THRESHOLD_MS,
   EXTERNAL_SCAN_INTERVAL_MS,
   EXTERNAL_STALE_CHECK_INTERVAL_MS,
   FILE_WATCHER_POLL_INTERVAL_MS,
   GLOBAL_SCAN_ACTIVE_MAX_AGE_MS,
   GLOBAL_SCAN_ACTIVE_MIN_SIZE,
+  NON_PRIMARY_STALE_TIMEOUT_MS,
   PROJECT_SCAN_INTERVAL_MS,
 } from './constants.js';
+import { seedContextUsage } from './contextUsage.js';
 import type { DismissalTracker } from './dismissalTracker.js';
+import { folderNameFromCwd, readCwdFromJsonl } from './jsonl.js';
+import { assignPaletteIfNeeded } from './paletteAssigner.js';
+import { pathsMatch } from './pathKey.js';
+import type { SubagentWatch } from './subagentWatch.js';
 import { cancelPermissionTimer, cancelWaitingTimer, clearAgentActivity } from './timerManager.js';
-import { processTranscriptLine } from './transcriptParser.js';
+import { getHookProvider, processTranscriptLine } from './transcriptParser.js';
 import type { AgentState } from './types.js';
 
 /** Dismissal tracker instance. Set once at startup via setDismissalTracker().
@@ -53,7 +63,10 @@ export function setDismissalTracker(tracker: DismissalTracker): void {
   dismissalTracker = tracker;
 }
 
-/** Get the active DismissalTracker (for PixelAgentsViewProvider direct access). */
+/** Get the active DismissalTracker (for PixelAgentsViewProvider direct access).
+ *
+ * @public
+ */
 export function getDismissalTracker(): DismissalTracker | null {
   return dismissalTracker;
 }
@@ -98,6 +111,11 @@ export function startFileWatching(
   waitingTimers: Map<number, ReturnType<typeof setTimeout>>,
   permissionTimers: Map<number, ReturnType<typeof setTimeout>>,
 ): void {
+  // Every watched agent passes through here, so this is the one place that can
+  // give an agent adopted or restored mid-session a context gauge without
+  // replaying its whole transcript.
+  seedContextUsage(agentId, agents, getHookProvider());
+
   // Single polling approach: reliable on all platforms (macOS, Linux, WSL2, Windows).
   // Previously used triple-redundant fs.watch + fs.watchFile + setInterval, but
   // fs.watch is unreliable on macOS/WSL2 and the redundancy created 3 timers per
@@ -141,7 +159,7 @@ export function startFileWatching(
           if (dismissalTracker!.isDismissed(file)) continue;
           let tracked = false;
           for (const a of agents.values()) {
-            if (a.jsonlFile === file) {
+            if (pathsMatch(a.jsonlFile, file)) {
               tracked = true;
               break;
             }
@@ -242,9 +260,8 @@ const trackedProjectDirs = new Set<string>();
 export function isTrackedProjectDir(dir: string): boolean {
   if (trackedProjectDirs.has(dir)) return true;
   // Case-insensitive fallback for Windows (drive letter casing: c:\ vs C:\)
-  const resolved = path.resolve(dir).toLowerCase();
   for (const tracked of trackedProjectDirs) {
-    if (path.resolve(tracked).toLowerCase() === resolved) return true;
+    if (pathsMatch(tracked, dir)) return true;
   }
   return false;
 }
@@ -514,8 +531,11 @@ function adoptTerminalForFile(
     hookDelivered: false,
     inputTokens: 0,
     outputTokens: 0,
+    contextTokens: 0,
+    maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
   };
 
+  assignPaletteIfNeeded(agent, agents);
   agents.set(id, agent);
   activeAgentIdRef.current = id;
   persistAgents();
@@ -559,14 +579,57 @@ export function setTeammateRemovalCallback(cb: (teammateAgentId: number) => void
   teammateRemovalCallback = cb;
 }
 
+/** Callback that registers a teammate's OWN session with the hook router.
+ *  Only invoked for teammates that run independent sessions (new-style implicit
+ *  teams); inline teammates share the lead's session and are never registered. */
+let teammateRegisterCallback: ((sessionId: string, agentId: number) => void) | null = null;
+
+/** Register the callback used to route an own-session teammate's hook events to it. */
+export function setTeammateRegisterCallback(
+  cb: (sessionId: string, agentId: number) => void,
+): void {
+  teammateRegisterCallback = cb;
+}
+
 /** Register the TeamProvider that describes the active CLI's Lead+Teammates pattern. */
 export function setTeamProvider(provider: TeamProvider): void {
   teamProvider = provider;
 }
 
+/** Shadow-store watcher for UNNAMED background spawns (sub-agents). Owned by
+ *  AgentRuntime; registered once at startup. When unset (tests wiring only the
+ *  scanners), unnamed spawns are simply not watched. */
+let subagentWatch: SubagentWatch | null = null;
+
+/** Register the SubagentWatch that mirrors unnamed background spawns' transcripts. */
+export function setSubagentWatch(watch: SubagentWatch | null): void {
+  subagentWatch = watch;
+}
+
 /** Register the active HookProvider for non-team capabilities (session roots, etc.). */
 export function setHookProvider(provider: HookProvider): void {
   hookProvider = provider;
+}
+
+/** Get the active (primary, file-watching) HookProvider, if set. Only that
+ *  provider's transcripts are parseable by transcriptParser — used by
+ *  adoptExternalSessionFromHook to gate watcher/poll starts for other providers. */
+export function getFileWatcherHookProvider(): HookProvider | null {
+  return hookProvider;
+}
+
+/**
+ * Resolves an external agent's `cwd`/`projectDir` to its `WorkspaceFolder.name` —
+ * the label the Areas UI keys on. Registered by the VS Code adapter; unset in
+ * standalone, which falls back to basename.
+ */
+export type FolderNameResolver = (ctx: { cwd?: string; projectDir?: string }) => string | undefined;
+
+let folderNameResolver: FolderNameResolver | null = null;
+
+/** Register the host's cwd/projectDir → WorkspaceFolder.name resolver (VS Code only). */
+export function setFolderNameResolver(resolver: FolderNameResolver): void {
+  folderNameResolver = resolver;
 }
 
 /**
@@ -592,17 +655,24 @@ export function scanForTeammateFiles(
   onAgentCreated?: (agent: AgentState) => void,
 ): void {
   if (!teamProvider) return;
-  const teammates = teamProvider.discoverTeammates(projectDir, sessionId);
-
   const parentAgent = agents.get(parentAgentId);
+  // teamName lets the provider also find new-style teammates: independent
+  // top-level sessions tagged with the team, not files under the lead's dir.
+  const teammates = teamProvider.discoverTeammates(projectDir, sessionId, parentAgent?.teamName);
 
-  for (const { jsonlPath: file, teammateName } of teammates) {
+  const parentLiveSpawnIds = parentAgent ? liveSpawnToolIds(parentAgent) : null;
+  for (const { jsonlPath: file, teammateName, sessionId: ownSessionId, toolUseId } of teammates) {
+    // Live-spawn sidecars (they carry the lead's spawn toolUseId) belong to
+    // scanForBackgroundAgentFiles, which classifies them by name: named
+    // background -> teammate, everything else -> watched sub-agent. Adopting
+    // them here would race that classification and mint a spurious teammate.
+    if (toolUseId && parentLiveSpawnIds?.has(toolUseId)) continue;
     if (knownTeammateFiles.has(file)) continue;
 
     // Also check if any existing agent already tracks this file
-    let alreadyTracked = false;
+    let alreadyTracked = subagentWatch?.isWatching(file) ?? false;
     for (const a of agents.values()) {
-      if (a.jsonlFile === file) {
+      if (pathsMatch(a.jsonlFile, file)) {
         alreadyTracked = true;
         break;
       }
@@ -636,6 +706,11 @@ export function scanForTeammateFiles(
       existingTeammate.lastDataAt = Date.now();
       existingTeammate.linesProcessed = 0;
       existingTeammate.isWaiting = false;
+      existingTeammate.teamUsesTmux = parentAgent?.teamUsesTmux;
+      if (ownSessionId && existingTeammate.sessionId !== ownSessionId) {
+        existingTeammate.sessionId = ownSessionId;
+        teammateRegisterCallback?.(ownSessionId, existingTeammate.id);
+      }
       startFileWatching(
         existingTeammate.id,
         file,
@@ -651,9 +726,10 @@ export function scanForTeammateFiles(
 
     const id = nextAgentIdRef.current++;
     // Read from start -- teammate JSONL is usually small and we want full tool history
+    // New-style teammates carry their own session id; inline teammates share the lead's.
     const agent: AgentState = {
       id,
-      sessionId,
+      sessionId: ownSessionId ?? sessionId,
       terminalRef: undefined,
       isExternal: true,
       projectDir,
@@ -678,12 +754,21 @@ export function scanForTeammateFiles(
       seenUnknownRecordTypes: new Set(),
       inputTokens: 0,
       outputTokens: 0,
+      contextTokens: 0,
+      maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
       // Agent Teams fields
       agentName: teammateName,
       leadAgentId: parentAgentId,
       teamName: parentAgent?.teamName,
+      teamUsesTmux: parentAgent?.teamUsesTmux,
     };
 
+    if (parentAgent?.palette !== undefined) {
+      agent.palette = parentAgent.palette;
+      agent.hueShift = parentAgent.hueShift ?? 0;
+    } else {
+      assignPaletteIfNeeded(agent, agents);
+    }
     agents.set(id, agent);
     persistAgents();
 
@@ -691,11 +776,187 @@ export function scanForTeammateFiles(
       `[Pixel Agents] Teammate detected: "${teammateName}" (Agent ${id}) for parent Agent ${parentAgentId} (${path.basename(file)})`,
     );
 
+    // Own-session teammates get registered so their hook events route directly
+    // to them. Inline teammates share the lead's session and must NOT be
+    // registered -- they would overwrite the lead in the session router.
+    if (ownSessionId) {
+      teammateRegisterCallback?.(ownSessionId, id);
+    }
+
     onAgentCreated?.(agent);
 
     startFileWatching(
       id,
       file,
+      agents,
+      fileWatchers,
+      pollingTimers,
+      waitingTimers,
+      permissionTimers,
+    );
+    readNewLines(id, agents, waitingTimers, permissionTimers);
+  }
+}
+
+/** All of a lead's LIVE spawn tool ids: background spawns (kept alive past
+ *  their tool_result, until the completion queue-operation) plus still-open
+ *  foreground spawn tools (Agent run_in_background:false — same sidecar shape
+ *  on current harnesses, closes with its tool_result). Sidecars matching any
+ *  of these belong to the background-agent flow, not teammate discovery. */
+function liveSpawnToolIds(lead: AgentState): Set<string> {
+  const ids = new Set(lead.backgroundAgentToolIds);
+  for (const toolId of lead.activeToolIds) {
+    const toolName = lead.activeToolNames.get(toolId);
+    if (toolName && hookProvider?.subagentToolNames.has(toolName)) {
+      ids.add(toolId);
+    }
+  }
+  return ids;
+}
+
+/**
+ * Classify background spawns (teams OFF) by their sidecar `name`.
+ *
+ * When a lead's Agent tool_result reports an async launch ("Async agent
+ * launched successfully"), the spawned agent runs in-process with its
+ * transcript under `<projectDir>/<leadSessionId>/subagents/` and a sidecar
+ * carrying agentType/description/toolUseId (+ `name` when the spawn was
+ * named) — but NO team registry anywhere, so the teammate flow never engages
+ * on its own. Per the domain model (CONTEXT.md) the name is the sole
+ * classifier:
+ *
+ * - NAMED spawn → Teammate: its own seated character, named from the sidecar
+ *   `name`; the spawner becomes its Lead (derived team — no teamName is set,
+ *   so team-config polling stays away).
+ * - UNNAMED spawn → Sub-agent: the transient Subtask character stays, and the
+ *   spawn's transcript is watched in the SHADOW store so its live activity
+ *   reaches the sub-character via subagentToolStart/Done translation.
+ *
+ * The anti-spurious gate is the sidecar's toolUseId matching one of the
+ * lead's LIVE backgroundAgentToolIds (instead of the teamName gate real teams
+ * use): only transcripts belonging to a currently-running background spawn
+ * are adopted. Completion (queue-operation on the lead) removes both kinds.
+ */
+export function scanForBackgroundAgentFiles(
+  leadId: number,
+  agents: AgentStateStore,
+  nextAgentIdRef: { current: number },
+  fileWatchers: Map<number, fs.FSWatcher>,
+  pollingTimers: Map<number, ReturnType<typeof setInterval>>,
+  waitingTimers: Map<number, ReturnType<typeof setTimeout>>,
+  permissionTimers: Map<number, ReturnType<typeof setTimeout>>,
+  persistAgents: () => void,
+  onAgentCreated?: (agent: AgentState) => void,
+): void {
+  if (!teamProvider) return;
+  const lead = agents.get(leadId);
+  if (!lead || !lead.sessionId || !lead.projectDir) return;
+  const liveSpawnIds = liveSpawnToolIds(lead);
+  if (liveSpawnIds.size === 0) return;
+
+  const entries = teamProvider.discoverTeammates(lead.projectDir, lead.sessionId);
+  for (const entry of entries) {
+    if (!entry.toolUseId || !liveSpawnIds.has(entry.toolUseId)) continue;
+
+    let alreadyTracked = subagentWatch?.isWatching(entry.jsonlPath) ?? false;
+    if (!alreadyTracked) {
+      for (const a of agents.values()) {
+        if (pathsMatch(a.jsonlFile, entry.jsonlPath)) {
+          alreadyTracked = true;
+          break;
+        }
+      }
+    }
+    if (alreadyTracked) continue;
+
+    // Foreground spawns (Agent run_in_background:false — the tool stays open
+    // for the whole run) write the same sidecar shape. They are within-turn
+    // work whatever the sidecar says: watch them, never seat them.
+    const isForeground = !lead.backgroundAgentToolIds.has(entry.toolUseId);
+
+    if (!entry.name || isForeground) {
+      // Unnamed spawn = Sub-agent: keep the Subtask character, watch the
+      // transcript in the shadow store for live activity. No agentCreated, no
+      // subagentClear, no persistence.
+      subagentWatch?.watch(lead, leadId, {
+        jsonlPath: entry.jsonlPath,
+        toolUseId: entry.toolUseId,
+      });
+      continue;
+    }
+
+    // Named spawn = Teammate.
+    const id = nextAgentIdRef.current++;
+    const agent: AgentState = {
+      id,
+      // In-process: shares the lead's session (like an inline teammate). Never
+      // registered with the session router -- it would overwrite the lead.
+      sessionId: lead.sessionId,
+      terminalRef: undefined,
+      isExternal: true,
+      projectDir: lead.projectDir,
+      jsonlFile: entry.jsonlPath,
+      fileOffset: 0,
+      lineBuffer: '',
+      activeToolIds: new Set(),
+      activeToolStatuses: new Map(),
+      activeToolNames: new Map(),
+      activeSubagentToolIds: new Map(),
+      activeSubagentToolNames: new Map(),
+      backgroundAgentToolIds: new Set(),
+      isWaiting: false,
+      permissionSent: false,
+      hadToolsInTurn: false,
+      hookDelivered: false,
+      lastDataAt: Date.now(),
+      linesProcessed: 0,
+      seenUnknownRecordTypes: new Set(),
+      inputTokens: 0,
+      outputTokens: 0,
+      contextTokens: 0,
+      maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
+      // Teammate-like linkage, but NO teamName: config polling must not touch these.
+      agentName: entry.name,
+      leadAgentId: leadId,
+      spawnToolUseId: entry.toolUseId,
+    };
+
+    if (lead.palette !== undefined) {
+      agent.palette = lead.palette;
+      agent.hueShift = lead.hueShift ?? 0;
+    } else {
+      assignPaletteIfNeeded(agent, agents);
+    }
+    agents.set(id, agent);
+
+    // Derived team: spawning a named agent makes the spawner a Lead, whether
+    // or not the CLI registered a team. No teamName on purpose (see above).
+    if (!lead.isTeamLead) {
+      lead.isTeamLead = true;
+      agents.broadcast({
+        type: 'agentTeamInfo',
+        id: leadId,
+        teamName: lead.teamName,
+        agentName: lead.agentName,
+        isTeamLead: true,
+        leadAgentId: lead.leadAgentId,
+      });
+    }
+
+    persistAgents();
+
+    console.log(
+      `[Pixel Agents] Background teammate detected: "${agent.agentName}" (Agent ${id}) for lead Agent ${leadId} (${path.basename(entry.jsonlPath)})`,
+    );
+
+    // The transient Subtask sub-character is superseded by this real character.
+    agents.broadcast({ type: 'subagentClear', id: leadId, parentToolId: entry.toolUseId });
+
+    onAgentCreated?.(agent);
+
+    startFileWatching(
+      id,
+      entry.jsonlPath,
       agents,
       fileWatchers,
       pollingTimers,
@@ -770,6 +1031,20 @@ export function scanAllTeammateFiles(
     // Only scan for lead agents (not teammates themselves)
     if (agent.leadAgentId !== undefined) continue;
     if (!agent.sessionId || !agent.projectDir) continue;
+    // Anonymous background agents (teams OFF): adopt sidecar transcripts for the
+    // lead's live background spawns. Gated by toolUseId matching, not teamName;
+    // no-ops instantly when the lead has no live background spawns.
+    scanForBackgroundAgentFiles(
+      agentId,
+      agents,
+      nextAgentIdRef,
+      fileWatchers,
+      pollingTimers,
+      waitingTimers,
+      permissionTimers,
+      persistAgents,
+      onAgentCreated,
+    );
     // Gate: basic-mode agents never get teamName set. Real team leads do, via JSONL.
     if (!agent.teamName) continue;
 
@@ -800,6 +1075,7 @@ export function adoptExternalSessionFromHook(
   sessionId: string,
   transcriptPath: string | undefined,
   cwd: string,
+  providerId: string,
   knownJsonlFiles: Set<string>,
   nextAgentIdRef: { current: number },
   agents: AgentStateStore,
@@ -810,12 +1086,22 @@ export function adoptExternalSessionFromHook(
 
   persistAgents: () => void,
   onAgentCreated?: (agent: AgentState) => void,
+  /** Persona continuity key (Hermes) — stamped on the new agent so a future
+   *  session-id rotation for the same persona can reattach instead of respawning. */
+  personaKey?: string,
+  /** Display-name fallback for cwd-less hooks-only sessions (the Hermes webui
+   *  runs with cwd NULL, so there is no directory basename to name the agent after). */
+  folderHint?: string,
+  /** Directory-EXP bucket for hooks-only providers (Hermes: 'hermes-<source>').
+   *  Stamped on the agent as its cwd — the webview keys character levels by
+   *  agent cwd, and hermes EXP accrues to stable persona buckets, not raw cwds. */
+  expBucket?: string,
 ): void {
   if (transcriptPath) {
     // File-based provider (Claude, Codex): adopt with JSONL file watching
     // Guard: don't adopt if file is already tracked by an agent
     for (const agent of agents.values()) {
-      if (agent.jsonlFile === transcriptPath) return;
+      if (pathsMatch(agent.jsonlFile, transcriptPath)) return;
     }
     // Don't check knownJsonlFiles here -- hooks confirmed this is a real session,
     // and seeded files at startup are in knownJsonlFiles but may become active later.
@@ -824,9 +1110,19 @@ export function adoptExternalSessionFromHook(
 
     knownJsonlFiles.add(transcriptPath);
     const projectDir = path.dirname(transcriptPath);
-    const folderName = folderNameFromProjectDir(path.basename(projectDir));
+    const folderName =
+      folderNameResolver?.({ cwd, projectDir }) ??
+      folderNameFromProjectDir(path.basename(projectDir));
 
-    adoptExternalSession(
+    // Only the primary (file-watching) provider's transcripts are parseable by
+    // transcriptParser. Other providers' agents keep jsonlFile for mtime-based
+    // staleness but are driven purely by hook events.
+    const parseable = providerId === getFileWatcherHookProvider()?.id;
+
+    // The hook delivered the authoritative cwd — pass it down so the display
+    // name is right even when the transcript is still empty (SessionStart fires
+    // before the first JSONL record lands).
+    const adoptedAgent = adoptExternalSession(
       transcriptPath,
       projectDir,
       nextAgentIdRef,
@@ -837,23 +1133,26 @@ export function adoptExternalSessionFromHook(
       permissionTimers,
       persistAgents,
       folderName,
+      cwd,
+      parseable,
     );
 
-    const adoptedAgent = [...agents.values()].find((a) => a.jsonlFile === transcriptPath);
-    if (adoptedAgent && debug) {
+    if (debug) {
       console.log(
         `[Pixel Agents] Hook: Agent ${adoptedAgent.id} - detected external session ${path.basename(transcriptPath)}${adoptedAgent.folderName ? ` (${adoptedAgent.folderName})` : ''}`,
       );
     }
-    if (adoptedAgent) {
-      adoptedAgent.sessionId = sessionId;
-      adoptedAgent.hookDelivered = true;
-      onAgentCreated?.(adoptedAgent);
-    }
+    adoptedAgent.sessionId = sessionId;
+    adoptedAgent.hookDelivered = true;
+    adoptedAgent.providerId = providerId;
+    adoptedAgent.personaKey = personaKey;
+    onAgentCreated?.(adoptedAgent);
   } else {
-    // Hooks-only provider (OpenCode, Copilot): no transcript file, all state from hooks
+    // Hooks-only provider (OpenCode, Copilot, Hermes): no transcript file, all
+    // state from hooks. cwd may be '' (Hermes webui session: cwd NULL) — the
+    // provider-supplied folderHint names the character then.
     const id = nextAgentIdRef.current++;
-    const folderName = cwd ? path.basename(cwd) : undefined;
+    const folderName = folderNameResolver?.({ cwd }) ?? folderNameFromCwd(cwd, folderHint);
     const agent: AgentState = {
       id,
       sessionId,
@@ -877,10 +1176,19 @@ export function adoptExternalSessionFromHook(
       lastDataAt: Date.now(),
       linesProcessed: 0,
       seenUnknownRecordTypes: new Set(),
+      // EXP bucket wins over the raw cwd: the webview levels characters by
+      // agent.cwd, and hooks-only providers (Hermes) accrue EXP to stable
+      // persona buckets rather than per-directory totals.
+      cwd: expBucket ?? (cwd || undefined),
       folderName,
+      providerId,
+      personaKey,
       inputTokens: 0,
       outputTokens: 0,
+      contextTokens: 0,
+      maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
     };
+    assignPaletteIfNeeded(agent, agents);
     agents.set(id, agent);
     persistAgents();
     if (debug) {
@@ -904,16 +1212,50 @@ function adoptExternalSession(
 
   persistAgents: () => void,
   folderName?: string,
-): void {
+  knownCwd?: string,
+  // Whether to start JSONL watching/polling for this agent. Defaults to true for
+  // the filesystem-based scanners (scanExternalDir, scanGlobalProjectDirs), which
+  // only ever discover the primary provider's own transcripts. Hook-driven adoption
+  // (adoptExternalSessionFromHook) passes this explicitly per-provider: non-primary
+  // providers' transcripts (e.g. Codex rollout files) are not Claude-transcript-shaped,
+  // so parsing them would emit garbage -- their agents are driven purely by hook events.
+  startWatching = true,
+): AgentState {
   const id = nextAgentIdRef.current++;
-  // Skip to end of file -- only show live activity going forward, not replay history
+  // Decide whether to replay the existing file content or skip to its end.
+  //
+  // The external scanner runs every EXTERNAL_SCAN_INTERVAL_MS. A freshly-created
+  // session writes its first records in the gap between scanner ticks (typical
+  // mock-claude scenarios: tool_use at t=1s, scanner ticks at t=3s). If we
+  // unconditionally skip to the end of the file, those pre-adoption records
+  // are silently discarded — the agent character appears but its tool history
+  // and active tools never surface, producing a "stuck on Idle" UI and flaky
+  // e2e failures whose mode depends entirely on scanner-tick alignment.
+  //
+  // Heuristic: a file whose birthtime is inside the scan window (2× the
+  // interval, for one missed tick of margin) is "a session we just watched
+  // come to life" — replay it from the start so no records are lost. Older
+  // files are ongoing sessions the user already had running before adoption;
+  // for those we keep the original skip-to-end behavior so an hours-long
+  // session doesn't flash hundreds of past tool overlays through the UI.
+  //
+  // birthtimeMs is reliable on macOS APFS, Windows NTFS, and modern Linux
+  // ext4. On filesystems that don't track it, Node returns the epoch (0) —
+  // we treat that as "very old" and skip to end, matching prior behavior.
   let fileOffset = 0;
   try {
     const stat = fs.statSync(jsonlFile);
-    fileOffset = stat.size;
+    const ageMs = stat.birthtimeMs > 0 ? Date.now() - stat.birthtimeMs : Number.POSITIVE_INFINITY;
+    const freshnessWindowMs = EXTERNAL_SCAN_INTERVAL_MS * 2;
+    fileOffset = ageMs <= freshnessWindowMs ? 0 : stat.size;
   } catch {
     /* start from beginning if stat fails */
   }
+  // Prefer the real working directory (hook-provided, else from the transcript)
+  // for the display name; the caller's `folderName` (derived from the lossy
+  // project-dir hash) is only a fallback. Setting `cwd` here also spares
+  // resolveAndCreditAgent a second read.
+  const cwd = knownCwd || readCwdFromJsonl(jsonlFile);
   const agent: AgentState = {
     id,
     sessionId: path.basename(jsonlFile, '.jsonl'),
@@ -936,27 +1278,34 @@ function adoptExternalSession(
     lastDataAt: Date.now(),
     linesProcessed: 0,
     seenUnknownRecordTypes: new Set(),
-    folderName,
+    cwd,
+    folderName: folderNameFromCwd(cwd, folderName),
     inputTokens: 0,
     outputTokens: 0,
+    contextTokens: 0,
+    maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
   };
 
+  assignPaletteIfNeeded(agent, agents);
   agents.set(id, agent);
   persistAgents();
 
   // Log is emitted by the caller (adoptExternalSessionFromHook or scanExternalDir)
   // to use the correct prefix (Hook: vs Watcher:).
 
-  startFileWatching(
-    id,
-    jsonlFile,
-    agents,
-    fileWatchers,
-    pollingTimers,
-    waitingTimers,
-    permissionTimers,
-  );
-  readNewLines(id, agents, waitingTimers, permissionTimers);
+  if (startWatching) {
+    startFileWatching(
+      id,
+      jsonlFile,
+      agents,
+      fileWatchers,
+      pollingTimers,
+      waitingTimers,
+      permissionTimers,
+    );
+    readNewLines(id, agents, waitingTimers, permissionTimers);
+  }
+  return agent;
 }
 
 /**
@@ -979,24 +1328,22 @@ export function startExternalSessionScanning(
   hooksEnabledRef?: { current: boolean },
 ): ReturnType<typeof setInterval> {
   return setInterval(() => {
-    // When hooks are active, SessionStart handles workspace session detection.
-    // Only skip workspace scanning; global scanning (Watch All) still needed
-    // because hooks can't detect already-running sessions from other projects.
-    if (!hooksEnabledRef?.current) {
-      // Scan all tracked project dirs (heuristic fallback)
-      for (const dir of trackedProjectDirs) {
-        scanExternalDir(
-          dir,
-          knownJsonlFiles,
-          nextAgentIdRef,
-          agents,
-          fileWatchers,
-          pollingTimers,
-          waitingTimers,
-          permissionTimers,
-          persistAgents,
-        );
-      }
+    // Scan all tracked project dirs in both hooks and heuristic modes. Hooks are
+    // a fast path for producers that emit hook events; polling remains the
+    // discovery path for workspace JSONL sessions created without hooks.
+    for (const dir of trackedProjectDirs) {
+      scanExternalDir(
+        dir,
+        knownJsonlFiles,
+        nextAgentIdRef,
+        agents,
+        fileWatchers,
+        pollingTimers,
+        waitingTimers,
+        permissionTimers,
+        persistAgents,
+        hooksEnabledRef,
+      );
     }
     // If "Watch All Sessions" is ON, also scan all global project dirs
     if (watchAllSessionsRef?.current) {
@@ -1026,6 +1373,9 @@ export function scanExternalDir(
   permissionTimers: Map<number, ReturnType<typeof setTimeout>>,
 
   persistAgents: () => void,
+  /** True when hooks are delivering. Only then does the hook-driven fast-attach
+   *  own teammate sessions; with hooks off this scan IS their discovery path. */
+  hooksEnabledRef?: { current: boolean },
 ): void {
   let files: string[];
   try {
@@ -1044,7 +1394,7 @@ export function scanExternalDir(
   // and agentManager will detect and reassign it. Prevents the scanner from
   // stealing the file as a new external agent.
   const hasOrphanedInternal = [...agents.values()].some((a) => {
-    if (a.isExternal || a.projectDir !== projectDir) return false;
+    if (a.isExternal || !pathsMatch(a.projectDir, projectDir)) return false;
     try {
       fs.statSync(a.jsonlFile);
       return false;
@@ -1053,6 +1403,14 @@ export function scanExternalDir(
     }
   });
   if (hasOrphanedInternal) return;
+
+  // SessionEnd(clear/resume) marks the current agent pending before SessionStart
+  // reassigns it. Do not let the external scanner steal the replacement file in
+  // that brief window.
+  const hasPendingReassignment = [...agents.values()].some(
+    (agent) => agent.pendingClear && pathsMatch(agent.projectDir, projectDir),
+  );
+  if (hasPendingReassignment) return;
 
   for (const file of files) {
     // --resume detection: seeded files whose mtime changed have new data.
@@ -1090,15 +1448,42 @@ export function scanExternalDir(
     // Check if already tracked by an agent (normalize paths for comparison).
     // This prevents the external scanner from adopting /clear files (already
     // reassigned to a terminal agent) while allowing untracked files through.
-    const normalizedFile = path.resolve(file);
     let tracked = false;
     for (const agent of agents.values()) {
-      if (path.resolve(agent.jsonlFile) === normalizedFile) {
+      if (pathsMatch(agent.jsonlFile, file)) {
         tracked = true;
         break;
       }
     }
     if (tracked) continue;
+
+    // WITH HOOKS ON, teammate sessions belong to team discovery, not to generic
+    // external adoption. Newer harnesses run each spawned agent as its own
+    // top-level session inside the LEAD's projectDir, so this scan sees it too
+    // -- and since workspace polling now runs under hooks as well, it can win
+    // the race against the hook-driven fast-attach. Adopting it here would strip
+    // the teammate identity (no leadAgentId, generic seat instead of the seat
+    // closest to its lead).
+    //
+    // WITH HOOKS OFF there is no fast-attach, so this scan is the ONLY discovery
+    // path for tmux teammates and must keep adopting them (they self-identify
+    // from their record tags afterwards). Hence the hooksEnabledRef gate.
+    //
+    // Skip only when the lead is actually tracked; an orphan team session still
+    // falls through to normal adoption.
+    const teamMeta = hooksEnabledRef?.current
+      ? teamProvider?.getTeamMetadataForSession(file)
+      : null;
+    if (teamMeta?.teamName && teamMeta.agentName) {
+      let leadTracked = false;
+      for (const agent of agents.values()) {
+        if (agent.teamName === teamMeta.teamName && agent.leadAgentId === undefined) {
+          leadTracked = true;
+          break;
+        }
+      }
+      if (leadTracked) continue;
+    }
 
     // Only adopt recently-active files (modified within threshold).
     try {
@@ -1181,7 +1566,7 @@ function scanGlobalProjectDirs(
   const now = Date.now();
   for (const dirPath of projectDirs) {
     // Skip directories already tracked by workspace scanning
-    if (trackedProjectDirs.has(dirPath)) continue;
+    if (isTrackedProjectDir(dirPath)) continue;
 
     let files: string[];
     try {
@@ -1197,7 +1582,7 @@ function scanGlobalProjectDirs(
       if (knownJsonlFiles.has(file)) continue;
       let tracked = false;
       for (const agent of agents.values()) {
-        if (agent.jsonlFile === file) {
+        if (pathsMatch(agent.jsonlFile, file)) {
           tracked = true;
           break;
         }
@@ -1212,12 +1597,11 @@ function scanGlobalProjectDirs(
         continue;
       }
 
-      const folderName = folderNameFromProjectDir(path.basename(dirPath));
+      const folderName =
+        folderNameResolver?.({ projectDir: dirPath }) ??
+        folderNameFromProjectDir(path.basename(dirPath));
       knownJsonlFiles.add(file);
-      console.log(
-        `[Pixel Agents] Watcher: detected global session ${path.basename(file)} (${folderName})`,
-      );
-      adoptExternalSession(
+      const adopted = adoptExternalSession(
         file,
         dirPath,
         nextAgentIdRef,
@@ -1228,6 +1612,11 @@ function scanGlobalProjectDirs(
         permissionTimers,
         persistAgents,
         folderName,
+      );
+      console.log(
+        `[Pixel Agents] Watcher: detected global session ${path.basename(file)}${
+          adopted.folderName ? ` (${adopted.folderName})` : ''
+        }`,
       );
     }
   }
@@ -1241,25 +1630,60 @@ export function startStaleExternalAgentCheck(
   agents: AgentStateStore,
   knownJsonlFiles: Set<string>,
   hooksEnabledRef?: { current: boolean },
+  /** Rollout files of currently-live processes (Codex process scan). An agent
+   *  whose jsonlFile is in this set is never reaped by mtime staleness below --
+   *  its process is confirmed running, so an idle rollout file (no writes
+   *  between turns) must not be mistaken for a dead session. Reaping resumes
+   *  once the process exits and the file drops out of the set. */
+  liveJsonlFiles?: Set<string>,
 ): ReturnType<typeof setInterval> {
   return setInterval(() => {
-    // When hooks are active, SessionEnd handles agent cleanup.
-    if (hooksEnabledRef?.current) return;
+    const primaryProviderId = getFileWatcherHookProvider()?.id;
     const toRemove: number[] = [];
 
     for (const [id, agent] of agents) {
       if (!agent.isExternal) continue;
 
-      // Only despawn if the JSONL file has been deleted from disk.
-      // Inactive external agents stay alive so they can resume when
-      // the session continues (e.g., claude --resume).
+      // Hooks-only agents (Hermes) have no transcript file (jsonlFile === '').
+      // fs.statSync('') throws, which the catch below treats as "file
+      // deleted -> remove" -- reaping them within one check interval of
+      // adoption. Their lifecycle is owned by their own poller's
+      // reapEnded/inactivity check, which fires SessionEnd through the
+      // normal hook path; this scanner must leave them alone entirely.
+      if (!agent.jsonlFile) continue;
+
+      if (liveJsonlFiles?.has(agent.jsonlFile)) continue;
+
+      // Non-primary-provider agents (Codex, Hermes, ...) never get a
+      // SessionEnd hook, so hooks mode can't clean them up the way it does
+      // Claude (the primary provider). Their mtime-based staleness check
+      // below is the only reaping path outside the standalone
+      // watchAllSessions process scan -- it still runs even when hooks are
+      // enabled. Primary-provider agents keep the existing hooks-mode skip
+      // (SessionEnd handles them there).
+      const isNonPrimaryProviderAgent =
+        !!agent.providerId && agent.providerId !== primaryProviderId;
+      if (hooksEnabledRef?.current && !isNonPrimaryProviderAgent) continue;
+
       try {
-        fs.statSync(agent.jsonlFile);
-        // File still exists — keep the agent alive regardless of mtime
+        const stat = fs.statSync(agent.jsonlFile);
+        if (hooksEnabledRef?.current && isNonPrimaryProviderAgent) {
+          // Hooks-mode, non-primary provider: mtime staleness is the only
+          // signal -- e.g. a Codex rollout file is never deleted on session end.
+          // Uses a longer window than EXTERNAL_ACTIVE_THRESHOLD_MS (which is
+          // tuned for scanners paired with process-liveness): a rollout file
+          // can go quiet between turns while the session is still alive.
+          if (Date.now() - stat.mtimeMs <= NON_PRIMARY_STALE_TIMEOUT_MS) continue;
+        } else {
+          // Heuristic mode: only despawn if the JSONL file has been deleted
+          // from disk. Inactive external agents stay alive so they can resume
+          // when the session continues (e.g., claude --resume).
+          continue;
+        }
       } catch {
         // File deleted — remove agent
-        toRemove.push(id);
       }
+      toRemove.push(id);
     }
 
     for (const id of toRemove) {

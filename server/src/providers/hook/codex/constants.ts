@@ -1,0 +1,58 @@
+/**
+ * Codex-specific constants. Codex (0.142+) speaks the Claude Code hooks JSON
+ * shape but supports a different event set: no SessionEnd, no Notification,
+ * no PostToolUseFailure. Session lifecycle end is handled by transcript-mtime
+ * staleness instead (see spec 2026-07-01-multi-provider-agents-design.md).
+ *
+ * NOTE: these exports are consumed by Task 7's installer (~/.codex/hooks.json
+ * writer + config.toml trust hashing), not by this task's normalize/format
+ * logic. Kept here (and kept exactly as specified) so Task 7 can import them
+ * without touching this file.
+ */
+
+/** Events we install in ~/.codex/hooks.json (the Claude-compatible subset). */
+export const CODEX_HOOK_EVENTS = [
+  'SessionStart',
+  'UserPromptSubmit',
+  'PreToolUse',
+  'PostToolUse',
+  'PermissionRequest',
+  'Stop',
+] as const;
+
+/** Codex's snake_case labels used in config.toml [hooks.state] trust keys. */
+export const CODEX_SNAKE_LABELS: Record<(typeof CODEX_HOOK_EVENTS)[number], string> = {
+  SessionStart: 'session_start',
+  UserPromptSubmit: 'user_prompt_submit',
+  PreToolUse: 'pre_tool_use',
+  PostToolUse: 'post_tool_use',
+  PermissionRequest: 'permission_request',
+  Stop: 'stop',
+};
+
+/** Events whose matcher is forced to None by Codex before trust-hashing —
+ *  the `matcher` key must be OMITTED from both hooks.json and the hash preimage. */
+export const CODEX_MATCHERLESS_EVENTS = new Set(['Stop', 'UserPromptSubmit']);
+
+export const CODEX_TERMINAL_NAME_PREFIX = 'Codex';
+export const CODEX_HOOK_TIMEOUT_SEC = 5;
+
+// ── Process Liveness Scanning (codexProcessScan.ts) ─────────
+/** Bytes read from the start of a Codex rollout file when looking for its
+ *  first-line `session_meta` record. session_meta lines are small JSON
+ *  objects; this generous bound avoids truncating one while avoiding a full
+ *  read of a potentially large rollout file. */
+export const CODEX_SESSION_META_READ_BYTES = 65_536; // 64KB
+/** How many day-directories (today backwards) under ~/.codex/sessions/ the
+ *  process scan searches when matching a live process cwd to its rollout.
+ *  Tradeoff: a session started more than this many days ago AND with no
+ *  rollout writes since (mtime ordering scans by date DIRECTORY, whose date
+ *  never changes) is not matched -- rare, since sessions that old and idle
+ *  are usually dead; bounding the walk keeps the 5s scan tick from crawling
+ *  an unbounded session archive. */
+export const CODEX_SESSIONS_SCAN_DAYS = 2; // today + yesterday
+
+// ── Output-token EXP (codexTokenReader.ts) ──────────────────
+/** `type` value of the rollout JSONL records carrying cumulative session token
+ *  usage: `{"type":"token_count","info":{"total_token_usage":{"output_tokens":N}}}`. */
+export const CODEX_TOKEN_COUNT_TYPE = 'token_count';

@@ -1,3 +1,4 @@
+import { pickDiversePalette } from '../../../../core/src/paletteUtils.js';
 import {
   AUTO_ON_FACING_DEPTH,
   AUTO_ON_SIDE_DEPTH,
@@ -6,10 +7,11 @@ import {
   CHARACTER_SITTING_OFFSET_PX,
   DISMISS_BUBBLE_FAST_FADE_SEC,
   FURNITURE_ANIM_INTERVAL_SEC,
-  HUE_SHIFT_MIN_DEG,
-  HUE_SHIFT_RANGE_DEG,
   INACTIVE_SEAT_TIMER_MIN_SEC,
   INACTIVE_SEAT_TIMER_RANGE_SEC,
+  MAX_PET_ID_LENGTH,
+  PET_HIT_HALF_WIDTH,
+  PET_HIT_HEIGHT,
   WAITING_BUBBLE_DURATION_SEC,
 } from '../../constants.js';
 import { getAnimationFrames, getCatalogEntry, getOnStateType } from '../layout/furnitureCatalog.js';
@@ -21,18 +23,37 @@ import {
   layoutToTileMap,
 } from '../layout/layoutSerializer.js';
 import { findPath, getWalkableTiles, isWalkable } from '../layout/tileMap.js';
+import { getPetCount, getPetName } from '../sprites/petSpriteData.js';
 import { getLoadedCharacterCount } from '../sprites/spriteData.js';
 import type {
   Character,
   FurnitureInstance,
   OfficeLayout,
+  Pet,
   PlacedFurniture,
+  PlacedPet,
   Seat,
   TileType as TileTypeVal,
 } from '../types.js';
-import { CharacterState, Direction, MATRIX_EFFECT_DURATION, TILE_SIZE } from '../types.js';
+import {
+  CharacterState,
+  Direction,
+  MATRIX_EFFECT_DURATION,
+  PetState,
+  TILE_SIZE,
+} from '../types.js';
 import { createCharacter, updateCharacter } from './characters.js';
 import { matrixEffectSeeds } from './matrixEffect.js';
+import { createPet, updatePet } from './petEntity.js';
+import { anchorTile, closestFreeSeat } from './seatPlacement.js';
+
+/** Internal helper: facing-tile coords for a seat. Returns null for invalid direction. */
+function seatFacingOffset(direction: Direction): { dCol: number; dRow: number } {
+  if (direction === Direction.RIGHT) return { dCol: 1, dRow: 0 };
+  if (direction === Direction.LEFT) return { dCol: -1, dRow: 0 };
+  if (direction === Direction.DOWN) return { dCol: 0, dRow: 1 };
+  return { dCol: 0, dRow: -1 };
+}
 
 export class OfficeState {
   layout: OfficeLayout;
@@ -42,6 +63,7 @@ export class OfficeState {
   furniture: FurnitureInstance[];
   walkableTiles: Array<{ col: number; row: number }>;
   characters: Map<number, Character> = new Map();
+  pets: Pet[] = [];
   /** Accumulated time for furniture animation frame cycling */
   furnitureAnimTimer = 0;
   selectedAgentId: number | null = null;
@@ -54,6 +76,17 @@ export class OfficeState {
   subagentMeta: Map<number, { parentAgentId: number; parentToolId: string }> = new Map();
   private nextSubagentId = -1;
 
+  /**
+   * folderName → list of Area labels that workspace folder belongs to.
+   * Populated by useExtensionMessages on `areaMappingsLoaded`. Consulted by
+   * `findFreeSeat()` to bias new agents toward seats inside their folder's Area.
+   */
+  areaMappings: Record<string, string[]> = {};
+
+  setAreaMappings(mappings: Record<string, string[]>): void {
+    this.areaMappings = mappings;
+  }
+
   constructor(layout?: OfficeLayout) {
     this.layout = layout || createDefaultLayout();
     this.tileMap = layoutToTileMap(this.layout);
@@ -61,6 +94,8 @@ export class OfficeState {
     this.blockedTiles = getBlockedTiles(this.layout.furniture);
     this.furniture = layoutToFurnitureInstances(this.layout.furniture);
     this.walkableTiles = getWalkableTiles(this.tileMap, this.blockedTiles);
+    // Pets are built last because they need walkableTiles populated for spawn.
+    this.rebuildPetsFromLayout(this.layout);
   }
 
   /** Rebuild all derived state from a new layout. Reassigns existing characters.
@@ -83,6 +118,18 @@ export class OfficeState {
         // Clear path since tile coords changed
         ch.path = [];
         ch.moveProgress = 0;
+      }
+    }
+
+    // Shift pet positions when grid expands left/up
+    if (shift && (shift.col !== 0 || shift.row !== 0)) {
+      for (const pet of this.pets) {
+        pet.tileCol += shift.col;
+        pet.tileRow += shift.row;
+        pet.x += shift.col * TILE_SIZE;
+        pet.y += shift.row * TILE_SIZE;
+        pet.path = [];
+        pet.moveProgress = 0;
       }
     }
 
@@ -114,7 +161,7 @@ export class OfficeState {
     // Second pass: assign remaining characters to free seats
     for (const ch of this.characters.values()) {
       if (ch.seatId) continue;
-      const seatId = this.findFreeSeat();
+      const seatId = this.findFreeSeat(ch.folderName);
       if (seatId) {
         this.seats.get(seatId)!.assigned = true;
         ch.seatId = seatId;
@@ -139,6 +186,34 @@ export class OfficeState {
         this.relocateCharacterToWalkable(ch);
       }
     }
+
+    // Relocate any pets that ended up outside bounds or on non-walkable tiles
+    for (const pet of this.pets) {
+      if (
+        pet.tileCol < 0 ||
+        pet.tileCol >= layout.cols ||
+        pet.tileRow < 0 ||
+        pet.tileRow >= layout.rows ||
+        !isWalkable(pet.tileCol, pet.tileRow, this.tileMap, this.blockedTiles)
+      ) {
+        if (this.walkableTiles.length > 0) {
+          const spawn = this.walkableTiles[Math.floor(Math.random() * this.walkableTiles.length)];
+          pet.tileCol = spawn.col;
+          pet.tileRow = spawn.row;
+          pet.x = spawn.col * TILE_SIZE + TILE_SIZE / 2;
+          pet.y = spawn.row * TILE_SIZE + TILE_SIZE / 2;
+          pet.path = [];
+          pet.moveProgress = 0;
+          pet.state = PetState.IDLE;
+          pet.frame = 0;
+          pet.frameTimer = 0;
+          pet.followTargetId = null;
+        }
+      }
+    }
+
+    // Reconcile pets against the layout roster (handles editor add/remove)
+    this.rebuildPetsFromLayout(layout);
   }
 
   /** Move a character to a random walkable tile */
@@ -174,62 +249,143 @@ export class OfficeState {
     return result;
   }
 
-  private findFreeSeat(): string | null {
-    // Build set of tiles occupied by electronics (PCs, monitors, etc.)
-    const electronicsTiles = new Set<string>();
+  /** Collect every tile occupied by electronics furniture (PCs, monitors, etc.). */
+  private buildElectronicsTileSet(): Set<string> {
+    const out = new Set<string>();
     for (const item of this.layout.furniture) {
       const entry = getCatalogEntry(item.type);
       if (!entry || entry.category !== 'electronics') continue;
       for (let dr = 0; dr < entry.footprintH; dr++) {
         for (let dc = 0; dc < entry.footprintW; dc++) {
-          electronicsTiles.add(`${item.col + dc},${item.row + dr}`);
+          out.add(`${item.col + dc},${item.row + dr}`);
         }
       }
     }
+    return out;
+  }
 
-    // Collect free seats, split into those facing electronics and the rest
+  /** Find the area label assigned to a seat's tile, or null. Public for e2e
+   *  observability (getAgentSeats hook reads a seated agent's area). */
+  seatZone(uid: string): string | null {
+    const seat = this.seats.get(uid);
+    if (!seat) return null;
+    const tiles = this.layout.areaTiles;
+    if (!tiles || tiles.length === 0) return null;
+    const idx = seat.seatRow * this.layout.cols + seat.seatCol;
+    if (idx < 0 || idx >= tiles.length) return null;
+    return tiles[idx] ?? null;
+  }
+
+  /**
+   * Does this seat face an electronics tile (PC, monitor)? Mirrors the
+   * forward-and-flanking scan used by furniture auto-state.
+   */
+  private isSeatFacingElectronics(seat: Seat, electronicsTiles: Set<string>): boolean {
+    const { dCol, dRow } = seatFacingOffset(seat.facingDir);
+    for (let d = 1; d <= AUTO_ON_FACING_DEPTH; d++) {
+      const tileCol = seat.seatCol + dCol * d;
+      const tileRow = seat.seatRow + dRow * d;
+      if (electronicsTiles.has(`${tileCol},${tileRow}`)) return true;
+      if (dCol !== 0) {
+        if (
+          electronicsTiles.has(`${tileCol},${tileRow - 1}`) ||
+          electronicsTiles.has(`${tileCol},${tileRow + 1}`)
+        ) {
+          return true;
+        }
+      } else if (
+        electronicsTiles.has(`${tileCol - 1},${tileRow}`) ||
+        electronicsTiles.has(`${tileCol + 1},${tileRow}`)
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Random-pick a seat from a candidate list, biased toward seats that face an
+   * electronics tile. Returns null when the candidate list is empty.
+   */
+  private pickFromSeats(seatUids: string[], electronicsTiles: Set<string>): string | null {
+    if (seatUids.length === 0) return null;
     const pcSeats: string[] = [];
     const otherSeats: string[] = [];
-    for (const [uid, seat] of this.seats) {
-      if (seat.assigned) continue;
-
-      // Check if this seat faces electronics (same logic as auto-state detection)
-      let facesPC = false;
-      const dCol =
-        seat.facingDir === Direction.RIGHT ? 1 : seat.facingDir === Direction.LEFT ? -1 : 0;
-      const dRow = seat.facingDir === Direction.DOWN ? 1 : seat.facingDir === Direction.UP ? -1 : 0;
-      for (let d = 1; d <= AUTO_ON_FACING_DEPTH && !facesPC; d++) {
-        const tileCol = seat.seatCol + dCol * d;
-        const tileRow = seat.seatRow + dRow * d;
-        if (electronicsTiles.has(`${tileCol},${tileRow}`)) {
-          facesPC = true;
-          break;
-        }
-        if (dCol !== 0) {
-          if (
-            electronicsTiles.has(`${tileCol},${tileRow - 1}`) ||
-            electronicsTiles.has(`${tileCol},${tileRow + 1}`)
-          ) {
-            facesPC = true;
-            break;
-          }
-        } else {
-          if (
-            electronicsTiles.has(`${tileCol - 1},${tileRow}`) ||
-            electronicsTiles.has(`${tileCol + 1},${tileRow}`)
-          ) {
-            facesPC = true;
-            break;
-          }
-        }
+    for (const uid of seatUids) {
+      const seat = this.seats.get(uid);
+      if (!seat) continue;
+      if (this.isSeatFacingElectronics(seat, electronicsTiles)) {
+        pcSeats.push(uid);
+      } else {
+        otherSeats.push(uid);
       }
-      (facesPC ? pcSeats : otherSeats).push(uid);
     }
-
-    // Pick randomly: prefer PC seats, then any seat
     if (pcSeats.length > 0) return pcSeats[Math.floor(Math.random() * pcSeats.length)];
     if (otherSeats.length > 0) return otherSeats[Math.floor(Math.random() * otherSeats.length)];
     return null;
+  }
+
+  /**
+   * 3-stage seat picker for top-level agents.
+   *
+   *   Stage 1: If `folderName` is given and `areaMappings[folderName]` lists
+   *            Area labels, prefer free seats whose tile is labeled with one
+   *            of those areas.
+   *   Stage 2: Prefer free seats whose tile has NO area label (unzoned).
+   *   Stage 3: Any free seat.
+   *
+   * Each stage routes through `pickFromSeats` for the PC-bias rule. Returns
+   * null only when every seat is already occupied. Passing `undefined`
+   * preserves pre-Areas single-stage behavior (skips Stage 1; Stage 2 picks
+   * unzoned seats from a layout without `areaTiles`, which is every seat).
+   */
+  private findFreeSeat(folderName?: string): string | null {
+    const electronicsTiles = this.buildElectronicsTileSet();
+    const freeSeats: string[] = [];
+    for (const [uid, seat] of this.seats) {
+      if (!seat.assigned) freeSeats.push(uid);
+    }
+    if (freeSeats.length === 0) return null;
+
+    const areaLabels = folderName ? this.areaMappings[folderName] : undefined;
+
+    // Stage 1 — in-area seats for the folder's mapped Area labels.
+    if (areaLabels && areaLabels.length > 0) {
+      const wanted = new Set(areaLabels);
+      const inArea = freeSeats.filter((uid) => {
+        const label = this.seatZone(uid);
+        return label !== null && wanted.has(label);
+      });
+      const pick = this.pickFromSeats(inArea, electronicsTiles);
+      if (pick) return pick;
+    }
+
+    // Stage 2 — unzoned seats (no area label, or layout has no areas at all).
+    const unzoned = freeSeats.filter((uid) => this.seatZone(uid) === null);
+    const pick2 = this.pickFromSeats(unzoned, electronicsTiles);
+    if (pick2) return pick2;
+
+    // Stage 3 — any free seat.
+    return this.pickFromSeats(freeSeats, electronicsTiles);
+  }
+
+  /** Closest walkable tile to (col,row) not occupied by another character, or null. */
+  private closestFreeWalkableTile(col: number, row: number): { col: number; row: number } | null {
+    const occupied = new Set<string>();
+    for (const ch of this.characters.values()) {
+      occupied.add(`${ch.tileCol},${ch.tileRow}`);
+    }
+    let best: { col: number; row: number } | null = null;
+    let bestDist = Infinity;
+    for (const tile of this.walkableTiles) {
+      if (occupied.has(`${tile.col},${tile.row}`)) continue;
+      const d = Math.abs(tile.col - col) + Math.abs(tile.row - row);
+      if (d < bestDist) {
+        best = tile;
+        bestDist = d;
+      }
+    }
+    return best;
   }
 
   /**
@@ -245,19 +401,7 @@ export class OfficeState {
       if (ch.isSubagent) continue;
       if (ch.palette < paletteCount) counts[ch.palette]++;
     }
-    const minCount = Math.min(...counts);
-    // Available = palettes at the minimum count (least used)
-    const available: number[] = [];
-    for (let i = 0; i < paletteCount; i++) {
-      if (counts[i] === minCount) available.push(i);
-    }
-    const palette = available[Math.floor(Math.random() * available.length)];
-    // First round (minCount === 0): no hue shift. Subsequent rounds: random ≥45°.
-    let hueShift = 0;
-    if (minCount > 0) {
-      hueShift = HUE_SHIFT_MIN_DEG + Math.floor(Math.random() * HUE_SHIFT_RANGE_DEG);
-    }
-    return { palette, hueShift };
+    return pickDiversePalette(paletteCount, counts);
   }
 
   addAgent(
@@ -267,6 +411,7 @@ export class OfficeState {
     preferredSeatId?: string,
     skipSpawnEffect?: boolean,
     folderName?: string,
+    nearAgentId?: number,
   ): void {
     if (this.characters.has(id)) return;
 
@@ -281,7 +426,12 @@ export class OfficeState {
       hueShift = pick.hueShift;
     }
 
-    // Try preferred seat first, then any free seat
+    // Try preferred seat first, then (for teammates) the seat closest to the
+    // anchor agent, then any free seat. anchorTile resolves to the anchor's SEAT
+    // (stable from creation) rather than its live tile, so a teammate placed while
+    // the lead is still walking to its seat still clusters around the final seat.
+    const anchor = nearAgentId !== undefined ? this.characters.get(nearAgentId) : undefined;
+    const anchorAt = anchorTile(anchor, this.seats);
     let seatId: string | null = null;
     if (preferredSeatId && this.seats.has(preferredSeatId)) {
       const seat = this.seats.get(preferredSeatId)!;
@@ -289,8 +439,11 @@ export class OfficeState {
         seatId = preferredSeatId;
       }
     }
+    if (!seatId && anchorAt) {
+      seatId = closestFreeSeat(this.seats, anchorAt.col, anchorAt.row);
+    }
     if (!seatId) {
-      seatId = this.findFreeSeat();
+      seatId = this.findFreeSeat(folderName);
     }
 
     let ch: Character;
@@ -299,11 +452,14 @@ export class OfficeState {
       seat.assigned = true;
       ch = createCharacter(id, palette, seatId, seat, hueShift);
     } else {
-      // No seats — spawn at random walkable tile
-      const spawn =
-        this.walkableTiles.length > 0
-          ? this.walkableTiles[Math.floor(Math.random() * this.walkableTiles.length)]
-          : { col: 1, row: 1 };
+      // No seats — teammates spawn beside their anchor, others at a random walkable tile
+      let spawn = anchorAt ? this.closestFreeWalkableTile(anchorAt.col, anchorAt.row) : null;
+      if (!spawn) {
+        spawn =
+          this.walkableTiles.length > 0
+            ? this.walkableTiles[Math.floor(Math.random() * this.walkableTiles.length)]
+            : { col: 1, row: 1 };
+      }
       ch = createCharacter(id, palette, null, null, hueShift);
       ch.x = spawn.col * TILE_SIZE + TILE_SIZE / 2;
       ch.y = spawn.row * TILE_SIZE + TILE_SIZE / 2;
@@ -384,6 +540,34 @@ export class OfficeState {
     }
   }
 
+  /**
+   * Move a just-linked teammate to the free seat closest to its lead, so teams
+   * cluster. Only moves when that seat is strictly closer than the teammate's
+   * current one — a teammate created as a plain external agent (seated by an
+   * arbitrary findFreeSeat) and tagged as a teammate only after tag discovery
+   * would otherwise keep its arbitrary seat, unlike an inline teammate seated
+   * next to the lead at creation.
+   */
+  private reseatNextToLead(teammateId: number, leadId: number): void {
+    const teammate = this.characters.get(teammateId);
+    const lead = this.characters.get(leadId);
+    if (!teammate || !lead) return;
+    const anchorAt = anchorTile(lead, this.seats);
+    if (!anchorAt) return;
+    const target = closestFreeSeat(this.seats, anchorAt.col, anchorAt.row);
+    if (!target || target === teammate.seatId) return;
+    const targetSeat = this.seats.get(target)!;
+    const targetDist =
+      Math.abs(targetSeat.seatCol - anchorAt.col) + Math.abs(targetSeat.seatRow - anchorAt.row);
+    const currentSeat = teammate.seatId ? this.seats.get(teammate.seatId) : undefined;
+    const currentDist = currentSeat
+      ? Math.abs(currentSeat.seatCol - anchorAt.col) + Math.abs(currentSeat.seatRow - anchorAt.row)
+      : Infinity;
+    if (targetDist < currentDist) {
+      this.reassignSeat(teammateId, target);
+    }
+  }
+
   /** Send an agent back to their currently assigned seat */
   sendToSeat(agentId: number): void {
     const ch = this.characters.get(agentId);
@@ -445,27 +629,9 @@ export class OfficeState {
     // Find the closest walkable tile to the parent, avoiding tiles occupied by other characters
     const parentCol = parentCh ? parentCh.tileCol : 0;
     const parentRow = parentCh ? parentCh.tileRow : 0;
-    const dist = (c: number, r: number) => Math.abs(c - parentCol) + Math.abs(r - parentRow);
-
-    // Build set of tiles occupied by existing characters
-    const occupiedTiles = new Set<string>();
-    for (const [, other] of this.characters) {
-      occupiedTiles.add(`${other.tileCol},${other.tileRow}`);
-    }
-
     let spawn = { col: parentCol, row: parentRow };
     if (this.walkableTiles.length > 0) {
-      let closest = this.walkableTiles[0];
-      let closestDist = Infinity;
-      for (const tile of this.walkableTiles) {
-        if (occupiedTiles.has(`${tile.col},${tile.row}`)) continue;
-        const d = dist(tile.col, tile.row);
-        if (d < closestDist) {
-          closest = tile;
-          closestDist = d;
-        }
-      }
-      spawn = closest;
+      spawn = this.closestFreeWalkableTile(parentCol, parentRow) ?? this.walkableTiles[0];
     }
 
     const ch = createCharacter(id, palette, null, null, hueShift);
@@ -664,10 +830,11 @@ export class OfficeState {
     }
   }
 
-  showWaitingBubble(id: number): void {
+  showWaitingBubble(id: number, awaitingInput = false): void {
     const ch = this.characters.get(id);
     if (ch) {
       ch.bubbleType = 'waiting';
+      ch.waitingAwaitingInput = awaitingInput;
       ch.bubbleTimer = WAITING_BUBBLE_DURATION_SEC;
     }
   }
@@ -685,6 +852,130 @@ export class OfficeState {
     }
   }
 
+  // ── Pets ──────────────────────────────────────────────────────
+
+  /**
+   * Add a pet to the live runtime. Spawns at a uniformly-random walkable tile.
+   * Mirror in `this.layout.pets` so debounced saveLayout serialises the roster.
+   * Bounds-checks petType against the loaded sprite count to defend against stale layouts.
+   */
+  addPet(placedPet: PlacedPet): void {
+    // Defensive guards (upstream 5e6c0a0)
+    if (
+      typeof placedPet.id !== 'string' ||
+      placedPet.id.length === 0 ||
+      placedPet.id.length > MAX_PET_ID_LENGTH
+    ) {
+      return;
+    }
+    if (
+      !Number.isInteger(placedPet.petType) ||
+      placedPet.petType < 0 ||
+      placedPet.petType >= getPetCount()
+    ) {
+      return;
+    }
+    if (this.pets.some((p) => p.id === placedPet.id)) return; // de-dupe
+    if (this.walkableTiles.length === 0) return; // no spawn space — silently drop
+
+    const spawn = this.walkableTiles[Math.floor(Math.random() * this.walkableTiles.length)];
+    const pet = createPet(placedPet.id, placedPet.petType, spawn.col, spawn.row);
+    pet.name = getPetName(placedPet.petType);
+    this.pets.push(pet);
+    this.syncLayoutPets();
+  }
+
+  /** Remove a pet by id. Idempotent. */
+  removePet(id: string): void {
+    const before = this.pets.length;
+    this.pets = this.pets.filter((p) => p.id !== id);
+    if (this.pets.length !== before) {
+      this.syncLayoutPets();
+    }
+  }
+
+  /** Shallow snapshot for external consumers (renderer, hooks). */
+  getPets(): Pet[] {
+    return this.pets.slice();
+  }
+
+  /** Unique petType values currently placed. Used by the Pets toolbar to mark active rows. */
+  getActivePetTypes(): number[] {
+    const seen = new Set<number>();
+    for (const p of this.pets) seen.add(p.petType);
+    return Array.from(seen);
+  }
+
+  /**
+   * Hit-test pets at a pixel world position. Sorts back-to-front (largest y wins on tie)
+   * so the visually-frontmost pet receives the click.
+   * Returns the pet id or null.
+   */
+  getPetAt(worldX: number, worldY: number): string | null {
+    const ordered = this.pets.slice().sort((a, b) => b.y - a.y);
+    for (const pet of ordered) {
+      const left = pet.x - PET_HIT_HALF_WIDTH;
+      const right = pet.x + PET_HIT_HALF_WIDTH;
+      const top = pet.y - PET_HIT_HEIGHT;
+      const bottom = pet.y;
+      if (worldX >= left && worldX <= right && worldY >= top && worldY <= bottom) {
+        return pet.id;
+      }
+    }
+    return null;
+  }
+
+  /** Show the heart bubble on a pet for WAITING_BUBBLE_DURATION_SEC. */
+  showPetBubble(petId: string): void {
+    const pet = this.pets.find((p) => p.id === petId);
+    if (!pet) return;
+    pet.bubbleType = 'heart';
+    pet.bubbleTimer = WAITING_BUBBLE_DURATION_SEC;
+  }
+
+  /** Dismiss the heart bubble on click; collapses timer to a fast fade. */
+  dismissPetBubble(petId: string): void {
+    const pet = this.pets.find((p) => p.id === petId);
+    if (!pet || !pet.bubbleType) return;
+    pet.bubbleTimer = Math.min(pet.bubbleTimer, DISMISS_BUBBLE_FAST_FADE_SEC);
+  }
+
+  /**
+   * Reconcile `this.pets` to match the layout's placed-pet roster.
+   * - Pets in layout but not in runtime → spawn via addPet().
+   * - Pets in runtime but not in layout → remove.
+   * - Pets in both → keep existing runtime state (position, FSM).
+   *
+   * Called from constructor and rebuildFromLayout. Always runs AFTER walkableTiles
+   * is populated.
+   */
+  private rebuildPetsFromLayout(layout: OfficeLayout): void {
+    const placed = layout.pets ?? [];
+    const placedIds = new Set(placed.map((p) => p.id));
+
+    // 1. Remove pets no longer in layout
+    this.pets = this.pets.filter((p) => placedIds.has(p.id));
+
+    // 2. Add pets that exist in layout but not in runtime
+    const existingIds = new Set(this.pets.map((p) => p.id));
+    for (const p of placed) {
+      if (existingIds.has(p.id)) continue;
+      this.addPet(p); // pushes onto this.pets, calls syncLayoutPets()
+    }
+    // syncLayoutPets() inside addPet keeps this.layout.pets coherent; one final
+    // sync handles the removal-only branch where addPet was never called.
+    this.syncLayoutPets();
+  }
+
+  /**
+   * Re-export the current pet roster into `this.layout.pets`. Called only from
+   * mutating methods (addPet / removePet / rebuildPetsFromLayout) — NEVER from
+   * getLayout(), which runs on every render frame.
+   */
+  private syncLayoutPets(): void {
+    this.layout.pets = this.pets.map((p) => ({ id: p.id, petType: p.petType }));
+  }
+
   setTeamInfo(
     id: number,
     teamName?: string,
@@ -695,6 +986,7 @@ export class OfficeState {
   ): void {
     const ch = this.characters.get(id);
     if (!ch) return;
+    const wasUnlinked = ch.leadAgentId === undefined;
     ch.teamName = teamName;
     ch.agentName = agentName;
     ch.isTeamLead = isTeamLead;
@@ -702,13 +994,32 @@ export class OfficeState {
     if (teamUsesTmux !== undefined) {
       ch.teamUsesTmux = teamUsesTmux;
     }
+    // A teammate is not a headless agent: clicking it focuses its lead's terminal.
+    // Adopted sessions are marked headless at creation and only later discovered
+    // to be teammates, so drop the mark once the link lands.
+    if (leadAgentId !== undefined) {
+      ch.isHeadless = false;
+    }
+    // A teammate discovered only after its plain external session was adopted is
+    // linked here, not at creation, so it never went through the seat-next-to-lead
+    // path addAgent runs for inline teammates. Cluster it now, once, on first link.
+    if (wasUnlinked && leadAgentId !== undefined && !isTeamLead) {
+      this.reseatNextToLead(id, leadAgentId);
+    }
   }
 
-  setAgentTokens(id: number, inputTokens: number, outputTokens: number): void {
+  /** Mark an agent as headless (adopted, no terminal to focus). */
+  setHeadless(id: number, headless: boolean): void {
     const ch = this.characters.get(id);
     if (!ch) return;
-    ch.inputTokens = inputTokens;
-    ch.outputTokens = outputTokens;
+    ch.isHeadless = headless;
+  }
+
+  setAgentContext(id: number, contextTokens: number, maxContextTokens: number): void {
+    const ch = this.characters.get(id);
+    if (!ch) return;
+    ch.contextTokens = contextTokens;
+    ch.maxContextTokens = maxContextTokens;
   }
 
   update(dt: number): void {
@@ -756,6 +1067,20 @@ export class OfficeState {
     // Remove characters that finished despawn
     for (const id of toDelete) {
       this.characters.delete(id);
+    }
+
+    // ── Pet FSM ────────────────────────────────────────────────
+    for (const pet of this.pets) {
+      updatePet(pet, dt, this.walkableTiles, this.characters, this.tileMap, this.blockedTiles);
+
+      // Tick heart bubble timer (mirrors character waiting-bubble pattern)
+      if (pet.bubbleType) {
+        pet.bubbleTimer -= dt;
+        if (pet.bubbleTimer <= 0) {
+          pet.bubbleType = null;
+          pet.bubbleTimer = 0;
+        }
+      }
     }
   }
 

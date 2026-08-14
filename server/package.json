@@ -6,11 +6,12 @@
     "test:watch": "vitest"
   },
   "devDependencies": {
-    "vitest": "^3.2.1"
+    "allure-vitest": "^3.9.0",
+    "vitest": "^4.1.10"
   },
   "dependencies": {
     "@fastify/cors": "^11.2.0",
-    "@fastify/static": "^9.1.1",
+    "@fastify/static": "^10.1.2",
     "@fastify/websocket": "^11.2.0",
     "fastify": "^5.8.5"
   }

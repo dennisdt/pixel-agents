@@ -17,6 +17,10 @@ export const WANDER_MOVES_BEFORE_REST_MIN = 3;
 export const WANDER_MOVES_BEFORE_REST_MAX = 6;
 export const SEAT_REST_MIN_SEC = 120.0;
 export const SEAT_REST_MAX_SEC = 240.0;
+/** How long a newly spawned character waits at its seat before wandering.
+ *  Must exceed the backend scan interval (2 s) so an active agent gets its
+ *  first agentStatus event before it ever leaves its seat. */
+export const SPAWN_SEAT_DELAY_SEC = 5.0;
 
 // ── Matrix Effect ────────────────────────────────────────────
 export const MATRIX_EFFECT_DURATION_SEC = 0.3;
@@ -41,6 +45,8 @@ export const CHARACTER_Z_SORT_OFFSET = 0.5;
 export const OUTLINE_Z_SORT_OFFSET = 0.001;
 export const SELECTED_OUTLINE_ALPHA = 1.0;
 export const HOVERED_OUTLINE_ALPHA = 0.5;
+/** Headless agents (adopted, no terminal to focus) render slightly translucent. */
+export const HEADLESS_CHARACTER_ALPHA = 0.5;
 export const GHOST_PREVIEW_SPRITE_ALPHA = 0.5;
 export const GHOST_PREVIEW_TINT_ALPHA = 0.25;
 export const SELECTION_DASH_PATTERN: [number, number] = [4, 3];
@@ -91,9 +97,81 @@ export const PAN_MARGIN_FRACTION = 0.25;
 // ── Editor ───────────────────────────────────────────────────
 export const UNDO_STACK_MAX_SIZE = 50;
 export const LAYOUT_SAVE_DEBOUNCE_MS = 500;
+
+// ── Layout Import/Export (browser-native, standalone) ────────
+/** Suggested filename when exporting the office layout from the standalone browser. */
+export const LAYOUT_EXPORT_FILENAME = 'pixel-agents-layout.json';
+/** MIME type for the exported layout Blob. */
+export const LAYOUT_EXPORT_MIME = 'application/json';
 export const DEFAULT_FLOOR_COLOR: ColorValue = { h: 35, s: 30, b: 15, c: 0 };
 export const DEFAULT_WALL_COLOR: ColorValue = { h: 240, s: 25, b: 0, c: 0 };
 export const DEFAULT_NEUTRAL_COLOR: ColorValue = { h: 0, s: 0, b: 0, c: 0 };
+
+// ── Carpets ──────────────────────────────────────────────────
+/** Main (lowest-luminance) color applied to carpets when no per-tile override is set. */
+export const CARPET_DEFAULT_COLOR: ColorValue = { h: 0, s: 71, b: -32, c: 0, colorize: true };
+/** Accent (highest-luminance) color applied to carpets when no per-tile override is set. */
+export const CARPET_DEFAULT_ACCENT_COLOR: ColorValue = {
+  h: 34,
+  s: 64,
+  b: 21,
+  c: 0,
+  colorize: true,
+};
+/** Keyboard key that switches from CARPET_PAINT to CARPET_PICK while editing. */
+export const KEY_CARPET_PICK = 'p';
+
+// ── Areas (named, colored workspace-folder zones) ────────────
+/** Color palette assigned to new Areas in rotation (cycles when more areas exist). */
+export const AREA_DEFAULT_COLORS: readonly string[] = [
+  '#ff6b6b',
+  '#feca57',
+  '#48dbfb',
+  '#1dd1a1',
+  '#5f27cd',
+  '#ff9ff3',
+  '#54a0ff',
+  '#ffa502',
+] as const;
+/** Translucent overlay alpha for area tile fills. */
+export const AREA_OVERLAY_ALPHA = 0.25;
+/** Alpha multiplier applied to the actively-selected area's overlay. */
+export const AREA_ACTIVE_ALPHA_MULTIPLIER = 1.6;
+/** Base font size (pixel-pre-zoom) for area centroid labels. */
+export const AREA_LABEL_FONT_SIZE_PX = 14;
+/** Minimum on-screen label size to keep labels legible at low zoom. */
+export const AREA_LABEL_MIN_FONT_SIZE_PX = 12;
+/** Alpha of the area label text. */
+export const AREA_LABEL_ALPHA = 1.0;
+/** Fallback label color when an area has no color set (shouldn't happen in practice). */
+export const AREA_LABEL_FALLBACK_COLOR = '#ffffff';
+/** Drop-shadow color behind area labels for legibility on light backgrounds. */
+export const AREA_LABEL_SHADOW_COLOR = '#000000';
+/** Drop-shadow alpha behind area labels. */
+export const AREA_LABEL_SHADOW_ALPHA = 0.6;
+
+// ── VisualColorPicker (HSV wheel + brightness for carpets) ───
+export const VISUAL_COLOR_PICKER_SV_SIZE_PX = 180;
+export const VISUAL_COLOR_PICKER_HUE_WIDTH_PX = 20;
+export const VISUAL_COLOR_PICKER_MARKER_RADIUS_PX = 6;
+/**
+ * The hue bar gradient is intrinsic to the color-picking interaction, not a
+ * theme color — it must span the full hue circle. Centralized here so the
+ * component body stays free of inline color literals. (The saturation/brightness
+ * square is painted to a canvas from the carpet HSL model, not a CSS gradient.)
+ */
+export const VISUAL_COLOR_PICKER_HUE_GRADIENT =
+  'linear-gradient(to bottom, ' +
+  '#ff0000 0%, #ffff00 16.7%, #00ff00 33.3%, ' +
+  '#00ffff 50%, #0000ff 66.7%, #ff00ff 83.3%, #ff0000 100%)';
+export const VISUAL_COLOR_PICKER_MARKER_BORDER = '2px solid #fff';
+export const VISUAL_COLOR_PICKER_MARKER_SHADOW = '0 0 0 1px rgba(0,0,0,0.6)';
+/** Width of the collapsed swatch + hex trigger row (compact mode). */
+export const VISUAL_COLOR_PICKER_COMPACT_WIDTH_PX = 160;
+/** Swatch square size shown in the collapsed trigger. */
+export const VISUAL_COLOR_PICKER_SWATCH_PX = 22;
+/** Gap (px) between the collapsed trigger and the expanded popup panel. */
+export const VISUAL_COLOR_PICKER_POPUP_GAP_PX = 6;
 
 // ── Notification Sound (done: ascending chime) ─────────────
 export const NOTIFICATION_NOTE_1_HZ = 659.25; // E5
@@ -118,6 +196,76 @@ export const FURNITURE_ANIM_INTERVAL_SEC = 0.2;
 export const WHATS_NEW_AUTO_CLOSE_MS = 20000;
 export const WHATS_NEW_FADE_MS = 1000;
 
+// ── Leveling / EXP ──────────────────────────────────────────
+export const EXP_BASE_COST = 5000;
+export const EXP_TIERS = [
+  { maxLevel: 5, growth: 1.5 },
+  { maxLevel: 10, growth: 1.35 },
+  { maxLevel: 20, growth: 1.18 },
+  { maxLevel: 35, growth: 1.08 },
+  { maxLevel: 50, growth: 1.04 },
+  { maxLevel: 100, growth: 1.01 }, // endgame: long, steady climb to 100
+] as const;
+export const EXP_BAR_WIDTH_PX = 80;
+export const EXP_BAR_HEIGHT_PX = 8;
+export const EXP_BAR_BG_COLOR = 'rgba(0, 0, 0, 0.75)';
+export const EXP_BAR_FILL_COLOR = '#5ac88c';
+export const EXP_BAR_BORDER_COLOR = 'rgba(255, 255, 255, 0.7)';
+
+// ── Leveling Rewards ────────────────────────────────────────
+export const LEVEL_TITLES = [
+  { level: 1, title: 'Intern', color: '#888888' },
+  { level: 5, title: 'Junior', color: '#cccccc' },
+  { level: 8, title: 'Developer', color: '#5ac88c' },
+  { level: 12, title: 'Senior', color: '#5a9ec8' },
+  { level: 16, title: 'Staff', color: '#8a5ac8' },
+  { level: 20, title: 'Principal', color: '#c8a85a' },
+  { level: 25, title: 'Architect', color: '#ff7b5a' },
+  { level: 30, title: 'Fellow', color: '#ff5a8a' },
+  { level: 35, title: 'Legend', color: '#ffd700' },
+  { level: 40, title: 'Mythic', color: '#ff4500' },
+  { level: 50, title: 'Transcendent', color: '#00ffcc' },
+  { level: 60, title: 'Ascendant', color: '#66e0ff' },
+  { level: 70, title: 'Immortal', color: '#ff9d45' },
+  { level: 80, title: 'Celestial', color: '#b48aff' },
+  { level: 90, title: 'Divine', color: '#ffee77' },
+  { level: 100, title: 'Singularity', color: '#ff5ad0' },
+] as const;
+
+export const LEVEL_AURAS = [
+  { level: 12, id: 'sparkle' },
+  { level: 15, id: 'halo' },
+  { level: 25, id: 'ember' },
+  { level: 35, id: 'prism' },
+  { level: 40, id: 'static' },
+  { level: 50, id: 'galaxy' },
+  { level: 65, id: 'storm' },
+  { level: 80, id: 'phoenix' },
+  { level: 100, id: 'ascendant' },
+] as const;
+
+// Aura animation constants (per-effect counts/alphas are lerped by intensity in auraEffect.ts)
+export const AURA_SPARKLE_CYCLE_SEC = 2.0;
+export const AURA_HALO_BOB_SEC = 2.4;
+export const AURA_HALO_GLINT_SEC = 3.0;
+export const AURA_EMBER_RISE_SEC = 2.2;
+export const AURA_PRISM_HUE_DRIFT_SEC = 6.0;
+export const AURA_STATIC_BURST_SLOW_SEC = 1.1;
+export const AURA_STATIC_BURST_FAST_SEC = 0.55;
+export const AURA_STATIC_FLASH_SEC = 0.12;
+export const AURA_GALAXY_ROTATE_SEC = 8.0;
+export const AURA_GALAXY_COMET_SEC = 5.0;
+export const AURA_STORM_RING_ROTATE_SEC = 6.0;
+export const AURA_STORM_ARC_SLOW_SEC = 0.7;
+export const AURA_STORM_ARC_FAST_SEC = 0.4;
+export const AURA_STORM_ARC_FLASH_SEC = 0.14;
+export const AURA_PHOENIX_FLICKER_HZ = 1; // true Hz (sin gets the 2π factor)
+export const AURA_PHOENIX_EMBER_RISE_SEC = 1.4;
+export const AURA_PHOENIX_WING_SEC = 2.2;
+export const AURA_ASCENDANT_SIGIL_ROTATE_SEC = 7.0;
+export const AURA_ASCENDANT_RAY_ROTATE_SEC = 11.0;
+export const AURA_ASCENDANT_PULSE_SEC = 3.0;
+
 // ── Game Logic ───────────────────────────────────────────────
 export const MAX_DELTA_TIME_SEC = 0.1;
 export const WAITING_BUBBLE_DURATION_SEC = 2.0;
@@ -126,25 +274,77 @@ export const INACTIVE_SEAT_TIMER_MIN_SEC = 3.0;
 export const INACTIVE_SEAT_TIMER_RANGE_SEC = 2.0;
 /** Default/fallback palette count (bundled characters). Actual count comes from getLoadedCharacterCount(). */
 export const PALETTE_COUNT = 6;
-export const HUE_SHIFT_MIN_DEG = 45;
-export const HUE_SHIFT_RANGE_DEG = 271;
 export const AUTO_ON_FACING_DEPTH = 3;
 export const AUTO_ON_SIDE_DEPTH = 2;
 export const CHARACTER_HIT_HALF_WIDTH = 8;
 export const CHARACTER_HIT_HEIGHT = 24;
 export const TOOL_OVERLAY_VERTICAL_OFFSET = 32;
+export const PULSE_ANIMATION_DURATION_SEC = 1.5;
+
+// ── Context Fuel Gauge ──────────────────────────────────────
+/** Window assumed before the runtime reports one (it always does for agents
+ *  that have taken a turn; this only covers characters created ahead of it). */
+export const DEFAULT_MAX_CONTEXT_TOKENS = 200_000;
+export const CONTEXT_WARN_THRESHOLD = 0.6;
+export const CONTEXT_DANGER_THRESHOLD = 0.8;
+export const CONTEXT_CRITICAL_THRESHOLD = 0.95;
+export const CONTEXT_GAUGE_WIDTH_PX = 40;
+export const CONTEXT_GAUGE_HEIGHT_PX = 4;
+export const CONTEXT_GAUGE_COLOR_OK = '#44cc44';
+export const CONTEXT_GAUGE_COLOR_WARN = '#ffcc00';
+export const CONTEXT_GAUGE_COLOR_DANGER = '#ff8800';
+export const CONTEXT_GAUGE_COLOR_CRITICAL = '#ff2222';
+export const CONTEXT_GAUGE_BG = '#222';
 
 // ── Agent Teams ─────────────────────────────────────────────
-export const MAX_CONTEXT_TOKENS = 200_000;
-export const TOKEN_WARN_THRESHOLD = 0.6;
-export const TOKEN_DANGER_THRESHOLD = 0.8;
-export const TOKEN_CRITICAL_THRESHOLD = 0.95;
-export const FUEL_GAUGE_WIDTH_PX = 40;
-export const FUEL_GAUGE_HEIGHT_PX = 4;
-export const FUEL_COLOR_OK = '#44cc44';
-export const FUEL_COLOR_WARN = '#ffcc00';
-export const FUEL_COLOR_DANGER = '#ff8800';
-export const FUEL_COLOR_CRITICAL = '#ff2222';
-export const FUEL_GAUGE_BG = '#222';
 export const TEAM_LEAD_COLOR = '#ffd700';
 export const TEAM_ROLE_COLOR = '#66aaff';
+
+// ── Pets ────────────────────────────────────────────────────────
+/** Walking speed in world pixels per second (matches character walk speed visually but slower). */
+export const PET_WALK_SPEED_PX_PER_SEC = 32;
+/** Time per WALK animation cycle step (4 cycle steps × 0.15s = 0.6s per loop). */
+export const PET_WALK_FRAME_DURATION_SEC = 0.15;
+/** Time per IDLE animation cycle step (4 cycle steps × 0.3s = 1.2s per loop). */
+export const PET_IDLE_FRAME_DURATION_SEC = 0.3;
+/** Walk cycle: 4-step lookup into the 3-frame walkDown/walkUp/walkRight arrays. */
+export const PET_WALK_SEQUENCE = [0, 1, 0, 2] as const;
+/** Idle cycle: 4-step lookup into the 3-frame idleDown/idleUp arrays. */
+export const PET_IDLE_SEQUENCE = [0, 1, 2, 1] as const;
+/** Minimum seconds the pet stays in IDLE before making a new decision. */
+export const PET_WANDER_PAUSE_MIN_SEC = 3.0;
+/** Maximum seconds the pet stays in IDLE before making a new decision. */
+export const PET_WANDER_PAUSE_MAX_SEC = 15.0;
+/** Seconds between FOLLOW path re-computations. */
+export const PET_FOLLOW_RECALC_INTERVAL_SEC = 1.0;
+/** Probability that a pet enters FOLLOW (instead of WALK) when wanderTimer expires. */
+export const PET_FOLLOW_CHANCE = 0.3;
+/** Maximum Manhattan distance (tiles) at which a character can become a follow target. */
+export const PET_FOLLOW_RADIUS_TILES = 3;
+/** Minimum seconds a FOLLOW episode lasts before timing out. */
+export const PET_FOLLOW_DURATION_MIN_SEC = 5.0;
+/** Maximum seconds a FOLLOW episode lasts before timing out. */
+export const PET_FOLLOW_DURATION_MAX_SEC = 15.0;
+/** Hit-box half-width (world px) for pet click detection. */
+export const PET_HIT_HALF_WIDTH = 8;
+/** Hit-box height (world px) measured upward from the bottom-center anchor. */
+export const PET_HIT_HEIGHT = 16;
+/** Zoom factor used to draw pet thumbnails in the EditorToolbar Pets tab. */
+export const PET_THUMB_ZOOM = 2;
+/** Scale margin so the pet thumbnail fills the ItemSelect cell without touching the edges. */
+export const PET_THUMB_SCALE_MARGIN = 0.85;
+/** Fallback background fill for sprite-less thumbnail (used while pet sprites are loading). */
+export const EMPTY_SPRITE_THUMBNAIL_BG = '#333';
+/** Maximum string length for a PlacedPet.id (defends against pathologically-long layout entries). */
+export const MAX_PET_ID_LENGTH = 128;
+// ── Provider badges (ToolOverlay) ────────────────────────────
+/** Short label per non-default provider shown under the activity text. */
+export const PROVIDER_BADGE_LABELS: Record<string, string> = {
+  codex: 'CODEX',
+  hermes: 'HERMES',
+};
+export const PROVIDER_BADGE_COLORS: Record<string, string> = {
+  codex: '#7dd3fc',
+  hermes: '#fbbf24',
+};
+export const PROVIDER_BADGE_FALLBACK_COLOR = '#a1a1aa';

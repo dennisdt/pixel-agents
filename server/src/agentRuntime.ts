@@ -14,28 +14,56 @@ import * as path from 'path';
 
 import type { HookProvider } from '../../core/src/provider.js';
 import type { AgentStateStore } from './agentStateStore.js';
+import { listLiveClaudeSessions, type LiveClaudeSession } from './claudeProcessScan.js';
+import {
+  DEFAULT_MAX_CONTEXT_TOKENS,
+  EXTERNAL_ACTIVE_THRESHOLD_MS,
+  PROCESS_SCAN_INTERVAL_MS,
+  PROCESS_SCAN_REMOVE_STRIKES,
+} from './constants.js';
+import { creditDirectoryTokens, creditHistoricalSession } from './directoryStats.js';
 import { DismissalTracker } from './dismissalTracker.js';
 import {
   adoptExternalSessionFromHook,
   ensureProjectScan,
+  getFileWatcherHookProvider,
   isTrackedProjectDir,
   reassignAgentToFile,
+  scanForBackgroundAgentFiles,
   scanForTeammateFiles,
   setAgentRemovalCallback,
   setDismissalTracker,
   setHookProvider as setFileWatcherHookProvider,
+  setSubagentWatch,
+  setTeammateRegisterCallback,
   setTeammateRemovalCallback,
   setTeamProvider,
   startExternalSessionScanning,
   startFileWatching,
   startStaleExternalAgentCheck,
 } from './fileWatcher.js';
-import type { HookEvent } from './hookEventHandler.js';
+import type { HookEvent, SessionLifecycleCallbacks } from './hookEventHandler.js';
 import { HookEventHandler } from './hookEventHandler.js';
+import { folderNameFromCwd, readCwdFromJsonl } from './jsonl.js';
+import { assignPaletteIfNeeded } from './paletteAssigner.js';
+import { PathSet, pathsMatch } from './pathKey.js';
+import {
+  listLiveCodexSessions,
+  type LiveCodexSession,
+} from './providers/hook/codex/codexProcessScan.js';
+import { CodexTokenReader } from './providers/hook/codex/codexTokenReader.js';
 import { SessionRouter } from './sessionRouter.js';
+import { SubagentWatch } from './subagentWatch.js';
 import { cancelPermissionTimer, cancelWaitingTimer } from './timerManager.js';
-import { setHookProvider } from './transcriptParser.js';
+import {
+  setBackgroundAgentCompletedCallback,
+  setBackgroundAgentDetectedCallback,
+  setHookProvider,
+  setTeamSwitchCallback,
+} from './transcriptParser.js';
 import type { AgentState } from './types.js';
+
+const debug = process.env.PIXEL_AGENTS_DEBUG !== '0';
 
 /** Callbacks that adapters register for platform-specific behavior. */
 export interface RuntimeLifecycleCallbacks {
@@ -53,12 +81,24 @@ export class AgentRuntime {
   readonly permissionTimers = new Map<number, ReturnType<typeof setTimeout>>();
   readonly jsonlPollTimers = new Map<number, ReturnType<typeof setInterval>>();
 
-  // Scanning state
-  readonly knownJsonlFiles = new Set<string>();
+  // Scanning state. PathSet (not Set) so a transcript adopted via hooks is still
+  // recognized as known when a scanner rebuilds the path from the workspace folder
+  // -- the two spellings differ by drive-letter case on Windows.
+  readonly knownJsonlFiles = new PathSet();
   readonly projectScanTimer = { current: null as ReturnType<typeof setInterval> | null };
   readonly activeAgentId = { current: null as number | null };
   private externalScanTimer: ReturnType<typeof setInterval> | null = null;
   private staleCheckTimer: ReturnType<typeof setInterval> | null = null;
+  private processScanTimer: ReturnType<typeof setInterval> | null = null;
+  /** Per-file count of consecutive process scans with no live process + stale file. */
+  private readonly liveSessionMisses = new Map<string, number>();
+  /** Rollout files of currently-live Codex processes, refreshed every process-scan
+   *  tick. Threaded into startStaleExternalAgentCheck so it never reaps a live
+   *  session on mtime alone (Codex has no SessionEnd hook -- see startProcessScan). */
+  readonly liveCodexJsonlFiles = new Set<string>();
+  /** Incremental output-token reader for Codex rollout files (directory EXP).
+   *  Polled from the process-scan tick for every codex agent with a jsonlFile. */
+  private readonly codexTokenReader = new CodexTokenReader();
 
   // Configuration refs (mutable, shared with scanners)
   readonly watchAllSessions = { current: false };
@@ -66,43 +106,161 @@ export class AgentRuntime {
 
   // Dependencies
   readonly dismissalTracker = new DismissalTracker();
-  private hookEventHandler: HookEventHandler;
+  /** Shadow-store watcher for unnamed background spawns (sub-agents). */
+  readonly subagentWatch: SubagentWatch;
+  private readonly hookEventHandlers = new Map<string, HookEventHandler>();
+  private readonly providers: HookProvider[];
   private lifecycleCallbacks: RuntimeLifecycleCallbacks = {};
 
   constructor(
     private readonly store: AgentStateStore,
-    provider: HookProvider,
+    providers: HookProvider[],
   ) {
-    // Wire module-level dependencies
+    this.providers = providers;
+    // The primary provider (index 0) owns the file-watching/transcript-parsing
+    // singletons — those modules are single-provider by design (Claude today).
+    const primary = providers[0];
     setDismissalTracker(this.dismissalTracker);
-    setHookProvider(provider);
-    setFileWatcherHookProvider(provider);
-    if (provider.team) {
-      setTeamProvider(provider.team);
+    setHookProvider(primary);
+    setFileWatcherHookProvider(primary);
+    this.subagentWatch = new SubagentWatch(store);
+    setSubagentWatch(this.subagentWatch);
+    if (primary.team) {
+      setTeamProvider(primary.team);
     }
     setAgentRemovalCallback((id) => this.removeAgent(id));
     setTeammateRemovalCallback((id) => this.removeTeammate(id, 'team-config'));
+    // New-style teammates run their own sessions; registering routes their hook
+    // events (PreToolUse, Stop, SessionEnd) directly to the teammate agent.
+    setTeammateRegisterCallback((sessionId, agentId) => this.registerAgent(sessionId, agentId));
+    // Background spawns (teams OFF): classify by sidecar name on spawn (named
+    // -> teammate character, unnamed -> shadow-watched sub-agent), remove when
+    // the completion queue-operation lands on the lead.
+    setBackgroundAgentDetectedCallback((leadId) => {
+      scanForBackgroundAgentFiles(
+        leadId,
+        this.store,
+        this.store.nextAgentId,
+        this.fileWatchers,
+        this.pollingTimers,
+        this.waitingTimers,
+        this.permissionTimers,
+        () => this.store.persist(),
+        undefined,
+      );
+    });
+    setBackgroundAgentCompletedCallback((leadId, toolUseId) => {
+      for (const [id, agent] of this.store) {
+        if (agent.leadAgentId === leadId && agent.spawnToolUseId === toolUseId) {
+          this.removeTeammate(id, 'background-complete');
+          break;
+        }
+      }
+      // Unnamed spawns live in the shadow store; the webview sub-character is
+      // cleared by the lead-side queue-op subagentClear, not by this call.
+      this.subagentWatch.removeBySpawn(leadId, toolUseId);
+    });
+    // A resumed lead that spawns again belongs to a freshly minted implicit
+    // team; its previous team's teammates are defunct. Promoted anonymous
+    // background agents (leadAgentId but no teamName) are left untouched.
+    setTeamSwitchCallback((leadId, previousTeamName) => {
+      const stale = [...this.store].filter(
+        ([, a]) => a.leadAgentId === leadId && a.teamName === previousTeamName,
+      );
+      for (const [id] of stale) {
+        this.removeTeammate(id, 'team-switch');
+      }
+    });
 
-    this.hookEventHandler = new HookEventHandler(
-      store,
-      this.waitingTimers,
-      this.permissionTimers,
-      provider,
-      new SessionRouter(),
-      this.watchAllSessions,
-    );
+    for (const provider of providers) {
+      this.hookEventHandlers.set(
+        provider.id,
+        new HookEventHandler(
+          store,
+          this.waitingTimers,
+          this.permissionTimers,
+          provider,
+          new SessionRouter(),
+          this.watchAllSessions,
+        ),
+      );
+    }
 
-    // Wire hook lifecycle callbacks to shared agent operations
-    this.hookEventHandler.setLifecycleCallbacks({
-      onExternalSessionDetected: (sessionId, transcriptPath, cwd) => {
+    // Wire hook lifecycle callbacks to shared agent operations, on every handler.
+    const lifecycleCallbacks: SessionLifecycleCallbacks = {
+      onExternalSessionDetected: (
+        sessionId,
+        transcriptPath,
+        cwd,
+        providerId,
+        personaKey,
+        folderHint,
+        expBucket,
+      ) => {
         const projectDir = transcriptPath ? path.dirname(transcriptPath) : cwd;
-        if (!isTrackedProjectDir(projectDir) && !this.watchAllSessions.current) {
+        // Teammate session of a tracked lead? Attach it as a teammate character
+        // instead of adopting a generic external agent -- and regardless of the
+        // Watch All Sessions setting: tracking the lead is the opt-in for its
+        // team. (Newer harnesses run every spawned agent as an independent
+        // top-level session that fires its own hooks.)
+        if (transcriptPath) {
+          const teamMeta = primary.team?.getTeamMetadataForSession(transcriptPath);
+          if (teamMeta?.teamName && teamMeta.agentName) {
+            for (const [leadId, lead] of this.store) {
+              if (lead.teamName !== teamMeta.teamName || lead.leadAgentId !== undefined) continue;
+              console.log(
+                `[Pixel Agents] Hook: session ${sessionId.slice(0, 8)}... is teammate "${teamMeta.agentName}" of Agent ${leadId}, attaching`,
+              );
+              scanForTeammateFiles(
+                lead.projectDir,
+                lead.sessionId,
+                leadId,
+                this.store.nextAgentId,
+                this.store,
+                this.fileWatchers,
+                this.pollingTimers,
+                this.waitingTimers,
+                this.permissionTimers,
+                () => this.store.persist(),
+                undefined,
+              );
+              break;
+            }
+            // Done only if discovery actually adopted this transcript. Old-style
+            // tmux teammates (non-UUID transcript names outside discovery's scan)
+            // fall through to normal external adoption and self-identify from
+            // their record tags.
+            for (const a of this.store.values()) {
+              if (pathsMatch(a.jsonlFile, transcriptPath)) return;
+            }
+          }
+        }
+        // The tracked-dir gate exists to filter transient Claude Extension
+        // sessions for the PRIMARY provider only (tracked dirs are Claude's
+        // ~/.claude/projects/<hash> workspace roots). Non-primary providers
+        // (Codex: ~/.codex/sessions/YYYY/MM/DD, Hermes: raw cwd) can never
+        // match a tracked dir, so gating them the same way silently drops
+        // every non-primary SessionStart when watchAllSessions is off. A
+        // hook-confirmed session for a non-primary provider is already real
+        // by construction -- it went through HookEventHandler's
+        // pending->confirmation flow -- so it bypasses this gate.
+        const isPrimaryProvider = providerId === primary.id;
+        if (
+          isPrimaryProvider &&
+          !isTrackedProjectDir(projectDir) &&
+          !this.watchAllSessions.current
+        ) {
+          console.log(
+            `[Pixel Agents] Hook: external session ${sessionId.slice(0, 8)}... not adopted ` +
+              `(project untracked, Watch All Sessions off)`,
+          );
           return;
         }
         adoptExternalSessionFromHook(
           sessionId,
           transcriptPath,
           cwd,
+          providerId,
           this.knownJsonlFiles,
           this.store.nextAgentId,
           this.store,
@@ -111,7 +269,10 @@ export class AgentRuntime {
           this.waitingTimers,
           this.permissionTimers,
           () => this.store.persist(),
-          (agent) => this.registerAgent(agent.sessionId, agent.id),
+          (agent) => this.handleAgentCreated(agent),
+          personaKey,
+          folderHint,
+          expBucket,
         );
       },
       onSessionClear: (agentId, newSessionId, newTranscriptPath) => {
@@ -154,7 +315,10 @@ export class AgentRuntime {
           this.waitingTimers,
           this.permissionTimers,
           () => this.store.persist(),
-          (agent) => this.registerAgent(agent.sessionId, agent.id),
+          // Don't register inline teammates: they share the lead's sessionId
+          // and registering them would overwrite the lead in the session router.
+          // Credit their EXP though — teammates emit output tokens of their own.
+          (agent) => this.resolveAndCreditAgent(agent),
         );
       },
       onTeammateRemoved: (teammateAgentId) => {
@@ -165,15 +329,20 @@ export class AgentRuntime {
         if (!agent) return;
         this.dismissalTracker.clearSeededMtime(agent.jsonlFile);
         this.dismissalTracker.dismiss(agent.jsonlFile);
-        if (agent.isTeamLead) {
-          this.removeTeammates(agentId);
-        }
+        // Covers real team leads AND leads of background teammates (which
+        // have children but no teamName). No-op when childless.
+        this.removeTeammates(agentId);
+        // Unnamed background spawns die with their lead's session too.
+        this.subagentWatch.removeByLead(agentId);
         if (agent.isExternal) {
           this.unregisterAgent(agent.sessionId);
           this.removeAgent(agentId);
         }
       },
-    });
+    };
+    for (const h of this.hookEventHandlers.values()) {
+      h.setLifecycleCallbacks(lifecycleCallbacks);
+    }
   }
 
   /** Register adapter-specific lifecycle callbacks. */
@@ -183,19 +352,69 @@ export class AgentRuntime {
 
   // ── Hook event routing ──
 
-  /** Route an incoming hook event to the appropriate agent. */
+  /** All registered providers (index 0 = primary). */
+  getProviders(): HookProvider[] {
+    return this.providers;
+  }
+
+  /** Look up a registered provider by id. */
+  getProvider(id: string): HookProvider | undefined {
+    return this.providers.find((p) => p.id === id);
+  }
+
+  /** Route an incoming hook event to the handler for its provider. */
   handleHookEvent(providerId: string, event: Record<string, unknown>): void {
-    this.hookEventHandler.handleEvent(providerId, event as HookEvent);
+    const handler = this.hookEventHandlers.get(providerId);
+    if (!handler) {
+      if (debug) console.log(`[Pixel Agents] Dropping event for unknown provider "${providerId}"`);
+      return;
+    }
+    handler.handleEvent(providerId, event as HookEvent);
   }
 
-  /** Register an agent with the hook event handler for session->agent mapping. */
+  /** Register an agent with every provider's hook event handler for session->agent
+   *  mapping. Cross-registering in every router is safe: each router only buffers
+   *  events that arrived at its own handler, so flushes stay provider-correct. */
   registerAgent(sessionId: string, agentId: number): void {
-    this.hookEventHandler.registerAgent(sessionId, agentId);
+    for (const h of this.hookEventHandlers.values()) h.registerAgent(sessionId, agentId);
   }
 
-  /** Unregister an agent from the hook event handler. */
+  /** Unregister an agent from every provider's hook event handler. */
   unregisterAgent(sessionId: string): void {
-    this.hookEventHandler.unregisterAgent(sessionId);
+    for (const h of this.hookEventHandlers.values()) h.unregisterAgent(sessionId);
+  }
+
+  /** Re-point an existing agent at a new session id (persona continuity —
+   *  Hermes session ids rotate while the persona persists). */
+  reattachSession(agentId: number, newSessionId: string): void {
+    const agent = this.store.get(agentId);
+    if (!agent) return;
+    if (agent.sessionId) this.unregisterAgent(agent.sessionId);
+    agent.sessionId = newSessionId;
+    this.registerAgent(newSessionId, agentId);
+    this.store.persist();
+  }
+
+  /** Called when an agent is created or restored: register it for hook routing,
+   *  then resolve its cwd and credit its historical EXP (once per session). All
+   *  creation paths funnel through here. */
+  private handleAgentCreated(agent: AgentState): void {
+    this.registerAgent(agent.sessionId, agent.id);
+    this.resolveAndCreditAgent(agent);
+  }
+
+  /** Resolve the agent's working directory (from its JSONL) and credit/broadcast
+   *  its directory-scoped EXP. Historical tokens are summed once per session. */
+  private resolveAndCreditAgent(agent: AgentState): void {
+    if (!agent.cwd) {
+      agent.cwd = readCwdFromJsonl(agent.jsonlFile);
+    }
+    if (!agent.cwd) return;
+    // Sum the whole file only when seeded at EOF; offset-0 agents (teammates)
+    // are fully credited by the live JSONL pump, so summing would double-count.
+    const totalExp = creditHistoricalSession(agent.jsonlFile, agent.cwd, agent.fileOffset > 0);
+    this.store.broadcast({ type: 'agentCwd', id: agent.id, cwd: agent.cwd });
+    this.store.broadcast({ type: 'directoryExp', directory: agent.cwd, totalExp });
   }
 
   // ── Agent removal (shared cleanup) ──
@@ -204,6 +423,17 @@ export class AgentRuntime {
   removeAgent(id: number): void {
     const agent = this.store.get(id);
     if (!agent) return;
+
+    // Unregister the session->agent mapping FIRST. Every removal path funnels
+    // through here (including fileWatcher.ts's stale-reap and orphaned-terminal
+    // scanners via agentRemovalCallback), and without this the session router
+    // keeps resolving the dead agent id forever: a later SessionStart for the
+    // same session id would see sessionRouter.resolve() return this id, find
+    // no agent in the store, and silently treat the session as "known" without
+    // re-adopting it (a black hole). Mirrors startProcessScan's
+    // unregister-then-remove pattern. Idempotent if already unregistered
+    // (e.g. removeTeammate/onSessionEnd call it explicitly before this).
+    this.unregisterAgent(agent.sessionId);
 
     // Stop JSONL poll timer
     const jpTimer = this.jsonlPollTimers.get(id);
@@ -225,6 +455,10 @@ export class AgentRuntime {
     cancelWaitingTimer(id, this.waitingTimers);
     cancelPermissionTimer(id, this.permissionTimers);
 
+    // Drop the codex token-reader state for this file (no-op for other
+    // providers -- only codex rollout files ever enter the reader's map).
+    if (agent.jsonlFile) this.codexTokenReader.forget(agent.jsonlFile);
+
     // Notify adapter before deleting from store
     this.lifecycleCallbacks.onAgentRemoved?.(id, agent);
 
@@ -239,9 +473,37 @@ export class AgentRuntime {
     if (!agent) return;
     console.log(`[Pixel Agents] Removing teammate ${teammateId} (source: ${source})`);
     this.dismissalTracker.dismiss(agent.jsonlFile);
-    this.unregisterAgent(agent.sessionId);
+    // Background teammates (spawnToolUseId set) share the LEAD's session id;
+    // unregistering it would knock the lead itself out of the session router.
+    if (!agent.spawnToolUseId) {
+      this.unregisterAgent(agent.sessionId);
+    }
     this.lifecycleCallbacks.onTeammateRemoved?.(teammateId, agent, source);
     this.removeAgent(teammateId);
+    if (agent.leadAgentId !== undefined) {
+      this.demoteLeadIfTeamEmpty(agent.leadAgentId);
+    }
+  }
+
+  /** Drop the LEAD badge when the last teammate leaves. teamName is kept: it
+   *  still routes discovery of late-arriving teammates of the same generation
+   *  (and linkTeammates / the derived-team path re-badge on the next spawn). */
+  private demoteLeadIfTeamEmpty(leadId: number): void {
+    const lead = this.store.get(leadId);
+    if (!lead || !lead.isTeamLead) return;
+    for (const a of this.store.values()) {
+      if (a.leadAgentId === leadId) return;
+    }
+    lead.isTeamLead = undefined;
+    this.store.broadcast({
+      type: 'agentTeamInfo',
+      id: leadId,
+      teamName: lead.teamName,
+      agentName: lead.agentName,
+      isTeamLead: undefined,
+      leadAgentId: lead.leadAgentId,
+    });
+    this.store.persist();
   }
 
   /** Remove all teammates of a lead agent. */
@@ -257,10 +519,35 @@ export class AgentRuntime {
       if (agent) {
         console.log(`[Pixel Agents] Removing teammate ${id} (lead ${leadId} closed)`);
         this.dismissalTracker.dismiss(agent.jsonlFile);
-        this.unregisterAgent(agent.sessionId);
+        if (!agent.spawnToolUseId) {
+          this.unregisterAgent(agent.sessionId);
+        }
         this.removeAgent(id);
       }
     }
+  }
+
+  // ── Launch-from-web ──
+
+  /** Adopt a session launched by the web UI (claude spawned into tmux). The
+   *  JSONL appears once claude starts; reuses the hook-adoption path to create
+   *  the agent, watch the file, and credit EXP. */
+  adoptLaunchedSession(sessionId: string, jsonlFile: string, cwd: string): void {
+    adoptExternalSessionFromHook(
+      sessionId,
+      jsonlFile,
+      cwd,
+      'claude', // launch-from-web only spawns Claude sessions in v1
+      this.knownJsonlFiles,
+      this.store.nextAgentId,
+      this.store,
+      this.fileWatchers,
+      this.pollingTimers,
+      this.waitingTimers,
+      this.permissionTimers,
+      () => this.store.persist(),
+      (agent) => this.handleAgentCreated(agent),
+    );
   }
 
   // ── Scanning ──
@@ -279,7 +566,7 @@ export class AgentRuntime {
       this.waitingTimers,
       this.permissionTimers,
       () => this.store.persist(),
-      onAgentCreated ?? ((agent) => this.registerAgent(agent.sessionId, agent.id)),
+      onAgentCreated ?? ((agent) => this.handleAgentCreated(agent)),
       this.hooksEnabled,
     );
   }
@@ -312,7 +599,176 @@ export class AgentRuntime {
       this.store,
       this.knownJsonlFiles,
       this.hooksEnabled,
+      this.liveCodexJsonlFiles,
     );
+  }
+
+  /**
+   * Start process-liveness scanning (gated by watchAllSessions): adopt every
+   * running `claude` session regardless of transcript mtime — so alive-but-idle
+   * sessions in other terminals/tmux show up — and drop external agents whose
+   * process has exited and whose transcript has gone stale.
+   *
+   * The mtime-based scanners can't see an idle session (no recent writes); this
+   * fills that gap by detecting the live process instead.
+   */
+  startProcessScan(): void {
+    if (this.processScanTimer) return;
+
+    const tick = (): void => {
+      // Codex output-token EXP runs BEFORE the watchAllSessions gate: it serves
+      // every codex agent with a rollout file, and hook-adopted codex agents
+      // exist (and accrue tokens) even when adopt-all-sessions is off.
+      this.creditCodexOutputTokens();
+
+      if (!this.watchAllSessions.current) {
+        // Scan disabled -- forget any previously-live Codex files so
+        // startStaleExternalAgentCheck's live-set skip doesn't protect them
+        // forever (see below: the set is otherwise only refreshed here).
+        this.liveCodexJsonlFiles.clear();
+        return;
+      }
+
+      let live: LiveClaudeSession[];
+      try {
+        live = listLiveClaudeSessions();
+      } catch {
+        return;
+      }
+      const liveFiles = new Set(live.map((s) => s.jsonlFile));
+
+      // Adopt any live session not already tracked. adoptExternalSessionFromHook
+      // dedupes already-tracked + dismissed files and seeds the offset at EOF,
+      // so re-running it every tick for known sessions is a cheap no-op.
+      for (const s of live) {
+        adoptExternalSessionFromHook(
+          s.sessionId,
+          s.jsonlFile,
+          s.cwd,
+          'claude', // listLiveClaudeSessions is Claude-only by construction
+          this.knownJsonlFiles,
+          this.store.nextAgentId,
+          this.store,
+          this.fileWatchers,
+          this.pollingTimers,
+          this.waitingTimers,
+          this.permissionTimers,
+          () => this.store.persist(),
+          (agent) => this.handleAgentCreated(agent),
+        );
+      }
+
+      // Remove external agents whose `claude` process is gone AND whose
+      // transcript is stale. The stale guard means an actively-writing session
+      // is never removed even if a single ps/lsof pass misses it; the strike
+      // counter absorbs transient misses.
+      const toRemove: number[] = [];
+      const externalFiles = new Set<string>();
+      for (const [id, agent] of this.store) {
+        // Hooks-only providers (no transcript file) are managed entirely by
+        // hook events — skip them; they're never in liveFiles and statSync('')
+        // would always read as stale.
+        if (!agent.isExternal || !agent.jsonlFile) continue;
+        externalFiles.add(agent.jsonlFile);
+        if (liveFiles.has(agent.jsonlFile)) {
+          this.liveSessionMisses.delete(agent.jsonlFile);
+          continue;
+        }
+        let stale = true;
+        try {
+          stale = Date.now() - fs.statSync(agent.jsonlFile).mtimeMs > EXTERNAL_ACTIVE_THRESHOLD_MS;
+        } catch {
+          stale = true; // transcript gone → removable
+        }
+        if (!stale) continue;
+        const misses = (this.liveSessionMisses.get(agent.jsonlFile) ?? 0) + 1;
+        if (misses < PROCESS_SCAN_REMOVE_STRIKES) {
+          this.liveSessionMisses.set(agent.jsonlFile, misses);
+          continue;
+        }
+        toRemove.push(id);
+      }
+      for (const id of toRemove) {
+        const agent = this.store.get(id);
+        if (agent) {
+          // Mirror startStaleExternalAgentCheck: forget the file so a future
+          // session can be re-adopted, and clear its strike entry.
+          this.knownJsonlFiles.delete(agent.jsonlFile);
+          this.liveSessionMisses.delete(agent.jsonlFile);
+          this.unregisterAgent(agent.sessionId);
+        }
+        this.removeAgent(id);
+      }
+      // Drop strike entries for files no longer held by any external agent
+      // (removed via X-close / SessionEnd / reassign) so the Map can't leak.
+      for (const file of this.liveSessionMisses.keys()) {
+        if (!externalFiles.has(file)) this.liveSessionMisses.delete(file);
+      }
+
+      // Codex has no SessionEnd hook, so a live rollout file that's gone quiet
+      // between turns is only visible to this process scan -- without it,
+      // startStaleExternalAgentCheck's mtime-based reap (NON_PRIMARY_STALE_TIMEOUT_MS)
+      // would remove it and this scan would immediately re-adopt it next tick.
+      // liveCodexJsonlFiles is threaded into startStaleExternalAgentCheck so it
+      // skips reaping any file still in this set (see startStaleCheck).
+      let liveCodex: LiveCodexSession[];
+      try {
+        liveCodex = listLiveCodexSessions();
+      } catch {
+        liveCodex = [];
+      }
+      this.liveCodexJsonlFiles.clear();
+      for (const s of liveCodex) {
+        this.liveCodexJsonlFiles.add(s.rolloutFile);
+        adoptExternalSessionFromHook(
+          s.sessionId,
+          s.rolloutFile,
+          s.cwd,
+          'codex',
+          this.knownJsonlFiles,
+          this.store.nextAgentId,
+          this.store,
+          this.fileWatchers,
+          this.pollingTimers,
+          this.waitingTimers,
+          this.permissionTimers,
+          () => this.store.persist(),
+          (agent) => this.handleAgentCreated(agent),
+        );
+      }
+    };
+
+    tick();
+    this.processScanTimer = setInterval(tick, PROCESS_SCAN_INTERVAL_MS);
+  }
+
+  /**
+   * Output-token EXP for codex agents: poll each agent's rollout file for new
+   * cumulative `token_count` records and credit positive deltas to the agent's
+   * real cwd (same directory-keyed leveling as Claude). Runs on the process-scan
+   * tick for BOTH hook-adopted and scan-adopted codex agents. Never throws.
+   */
+  private creditCodexOutputTokens(): void {
+    for (const agent of this.store.values()) {
+      if (agent.providerId !== 'codex' || !agent.jsonlFile || !agent.cwd) continue;
+      try {
+        const delta = this.codexTokenReader.poll(agent.jsonlFile);
+        if (delta <= 0) continue;
+        agent.outputTokens += delta;
+        const totalExp = creditDirectoryTokens(agent.cwd, delta);
+        this.store.broadcast({ type: 'directoryExp', directory: agent.cwd, totalExp });
+        // Unlike hermes (whose poller has no agent id), the runtime knows the
+        // agent here -- mirror transcriptParser's per-agent usage broadcast.
+        this.store.broadcast({
+          type: 'agentTokenUsage',
+          id: agent.id,
+          inputTokens: agent.inputTokens,
+          outputTokens: agent.outputTokens,
+        });
+      } catch {
+        /* never throw out of the scan tick */
+      }
+    }
   }
 
   // ── Restore persisted external agents (standalone) ──
@@ -333,6 +789,11 @@ export class AgentRuntime {
 
     for (const p of persisted) {
       if (!p.isExternal) continue;
+      // Background-spawn children (a leadAgentId but no teamName) are derived
+      // state: the 1s scan re-materializes them from sidecars while their spawn
+      // is live. Restoring them directly would resurrect immortal characters
+      // (also skips stale entries written by older builds that persisted them).
+      if (p.leadAgentId !== undefined && !p.teamName) continue;
       try {
         if (!fs.existsSync(p.jsonlFile)) continue;
       } catch {
@@ -344,6 +805,13 @@ export class AgentRuntime {
         continue;
       }
 
+      // Prefer the persisted cwd (authoritative, provider-agnostic) and only
+      // fall back to re-reading the transcript: readCwdFromJsonl understands
+      // Claude's flat `cwd` field plus Codex's session_meta shape, but agents
+      // persisted before cwd persistence existed need the file fallback.
+      // resolveAndCreditAgent (called below) reuses this cwd instead of
+      // re-reading the file.
+      const cwd = p.cwd || readCwdFromJsonl(p.jsonlFile);
       const agent: AgentState = {
         id: p.id,
         sessionId: p.sessionId || path.basename(p.jsonlFile, '.jsonl'),
@@ -358,44 +826,65 @@ export class AgentRuntime {
         activeToolNames: new Map(),
         activeSubagentToolIds: new Map(),
         activeSubagentToolNames: new Map(),
-        backgroundAgentToolIds: new Set(),
+        // Live spawn ids survive the restart so the 1s scan can re-adopt the
+        // spawns' transcripts and the completion queue-op still matches.
+        backgroundAgentToolIds: new Set(p.backgroundAgentToolIds ?? []),
         isWaiting: false,
         permissionSent: false,
         hadToolsInTurn: false,
         lastDataAt: 0,
         linesProcessed: 0,
         seenUnknownRecordTypes: new Set(),
-        folderName: p.folderName,
+        cwd,
+        folderName: folderNameFromCwd(cwd, p.folderName),
         hookDelivered: false,
+        providerId: p.provider,
+        personaKey: p.personaKey,
         inputTokens: 0,
         outputTokens: 0,
+        contextTokens: 0,
+        maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
         teamName: p.teamName,
         agentName: p.agentName,
         isTeamLead: p.isTeamLead,
         leadAgentId: p.leadAgentId,
         teamUsesTmux: p.teamUsesTmux,
+        palette: p.palette,
+        hueShift: p.hueShift,
       };
 
+      assignPaletteIfNeeded(agent, this.store);
       this.store.set(p.id, agent);
       this.knownJsonlFiles.add(p.jsonlFile);
 
       try {
         const stat = fs.statSync(p.jsonlFile);
         agent.fileOffset = stat.size;
-        startFileWatching(
-          p.id,
-          p.jsonlFile,
-          this.store,
-          this.fileWatchers,
-          this.pollingTimers,
-          this.waitingTimers,
-          this.permissionTimers,
-        );
+        // Only the primary provider's transcripts are Claude-shaped and safe
+        // for transcriptParser (see adoptExternalSessionFromHook's `parseable`
+        // gate, applied at live-adoption time). Restoring from persistence must
+        // apply the same gate -- otherwise a restarted server starts parsing a
+        // Codex rollout file with the Claude transcript parser. The agent is
+        // still restored (character appears, jsonlFile kept for staleness);
+        // it just isn't watched/polled. Legacy persisted agents with no
+        // `provider` field predate multi-provider support and were always
+        // Claude, so they keep watching.
+        if (!p.provider || p.provider === getFileWatcherHookProvider()?.id) {
+          startFileWatching(
+            p.id,
+            p.jsonlFile,
+            this.store,
+            this.fileWatchers,
+            this.pollingTimers,
+            this.waitingTimers,
+            this.permissionTimers,
+          );
+        }
       } catch {
         /* ignore stat errors on restore */
       }
 
-      this.registerAgent(agent.sessionId, agent.id);
+      this.handleAgentCreated(agent);
 
       if (p.id > maxId) maxId = p.id;
       console.log(
@@ -414,7 +903,8 @@ export class AgentRuntime {
 
   /** Clean up all scanners, timers, and agents. Called on shutdown. */
   dispose(): void {
-    this.hookEventHandler.dispose();
+    for (const h of this.hookEventHandlers.values()) h.dispose();
+    this.subagentWatch.dispose();
 
     if (this.projectScanTimer.current) {
       clearInterval(this.projectScanTimer.current);
@@ -428,6 +918,11 @@ export class AgentRuntime {
       clearInterval(this.staleCheckTimer);
       this.staleCheckTimer = null;
     }
+    if (this.processScanTimer) {
+      clearInterval(this.processScanTimer);
+      this.processScanTimer = null;
+    }
+    this.liveSessionMisses.clear();
 
     for (const id of [...this.store.keys()]) {
       this.removeAgent(id);

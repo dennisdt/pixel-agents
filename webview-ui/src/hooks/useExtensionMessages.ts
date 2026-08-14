@@ -1,19 +1,37 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { playDoneSound, playPermissionSound, setSoundEnabled } from '../notificationSound.js';
+import type { ExistingAgentMeta, PendingAgent } from '../office/engine/existingAgents.js';
+import { reconcileExistingAgents } from '../office/engine/existingAgents.js';
 import type { OfficeState } from '../office/engine/officeState.js';
+import { setGhostHeadlessAgents as setRendererGhostHeadlessAgents } from '../office/engine/renderer.js';
 import { setFloorSprites } from '../office/floorTiles.js';
 import { buildDynamicCatalog } from '../office/layout/furnitureCatalog.js';
 import { migrateLayoutColors } from '../office/layout/layoutSerializer.js';
+import { setCarpetSprites } from '../office/sprites/carpetTiles.js';
+import { setPetTemplates } from '../office/sprites/petSpriteData.js';
 import { setCharacterTemplates } from '../office/sprites/spriteData.js';
 import {
+  calculateLevel,
   extractToolName,
   isSubagentToolName,
   setProviderCapabilities,
 } from '../office/toolUtils.js';
 import type { OfficeLayout, ToolActivity } from '../office/types.js';
 import { setWallSprites } from '../office/wallTiles.js';
+import { isBrowserRuntime, isE2E } from '../runtime.js';
 import { transport } from '../transport/index.js';
+
+/**
+ * A Headless agent is one the office adopted from outside (`claude -p`, a session
+ * picked up by Watch All Sessions) and therefore has no terminal to focus. Its
+ * character renders translucent so it reads as untouchable at a glance.
+ *
+ * Standalone is exempt: that adapter has no terminals at all, so every agent
+ * would qualify and the cue would distinguish nothing.
+ */
+const isHeadlessAgent = (isExternal: boolean | undefined): boolean =>
+  isExternal === true && !isBrowserRuntime;
 
 export interface SubagentCharacter {
   id: number;
@@ -61,15 +79,34 @@ interface ExtensionMessageState {
   layoutWasReset: boolean;
   loadedAssets?: { catalog: FurnitureAsset[]; sprites: Record<string, string[][]> };
   workspaceFolders: WorkspaceFolder[];
+  /** Distinct folderNames seen across agents this session — source for the Areas folder dropdown. */
+  agentFolderNames: string[];
   externalAssetDirectories: string[];
   lastSeenVersion: string;
   extensionVersion: string;
   watchAllSessions: boolean;
   setWatchAllSessions: (v: boolean) => void;
   alwaysShowLabels: boolean;
+  ghostHeadlessAgents: boolean;
+  setGhostHeadlessAgents: (v: boolean) => void;
   hooksEnabled: boolean;
   setHooksEnabled: (v: boolean) => void;
   hooksInfoShown: boolean;
+  // Areas
+  areaMappings: Record<string, string[]>;
+  setAreaMappings: (m: Record<string, string[]>) => void;
+  showAreas: boolean;
+  setShowAreas: (v: boolean) => void;
+}
+
+/** Tauri-fork: set a character's level + stored exp from cumulative directory EXP. */
+function syncCharacterLevel(os: OfficeState, agentId: number, exp: number): void {
+  if (exp <= 0) return;
+  const ch = os.characters.get(agentId);
+  if (ch && !ch.isSubagent) {
+    ch.level = calculateLevel(exp).level;
+    ch.directoryExp = exp;
+  }
 }
 
 function saveAgentSeats(os: OfficeState): void {
@@ -100,33 +137,112 @@ export function useExtensionMessages(
     { catalog: FurnitureAsset[]; sprites: Record<string, string[][]> } | undefined
   >();
   const [workspaceFolders, setWorkspaceFolders] = useState<WorkspaceFolder[]>([]);
+  const [agentFolderNames, setAgentFolderNames] = useState<string[]>([]);
   const [externalAssetDirectories, setExternalAssetDirectories] = useState<string[]>([]);
   const [lastSeenVersion, setLastSeenVersion] = useState('');
   const [extensionVersion, setExtensionVersion] = useState('');
   const [watchAllSessions, setWatchAllSessions] = useState(false);
   const [alwaysShowLabels, setAlwaysShowLabels] = useState(false);
+  const [ghostHeadlessAgents, setGhostHeadlessAgentsState] = useState(false);
   const [hooksEnabled, setHooksEnabled] = useState(true);
   const [hooksInfoShown, setHooksInfoShown] = useState(true);
+  const [areaMappings, setAreaMappings] = useState<Record<string, string[]>>({});
+  const [showAreas, setShowAreas] = useState(false);
+
+  // The renderer keeps its own module-level copy (read every rAF frame), so both
+  // sources of truth move together — the persisted value on settingsLoaded and
+  // the user's click in Settings.
+  const applyGhostHeadlessAgents = useCallback((enabled: boolean) => {
+    setGhostHeadlessAgentsState(enabled);
+    setRendererGhostHeadlessAgents(enabled);
+  }, []);
+
+  // Tauri-fork: directory-scoped EXP (cumulative output tokens per project dir)
+  // drives character leveling & aura effects. agentCwdsRef maps agent id -> cwd
+  // so directoryExp updates can resolve to active characters.
+  const directoryExpRef = useRef<Record<string, number>>({});
+  const agentCwdsRef = useRef<Record<number, string>>({});
+  // Provider that owns each agent ('codex' | 'hermes' | ...); absent = claude.
+  const agentProvidersRef = useRef<Record<number, string>>({});
 
   // Track whether initial layout has been loaded (ref to avoid re-render)
   const layoutReadyRef = useRef(false);
 
+  // Live background spawn tools per agent (runInBackground agentToolStart, or a
+  // lazily-created watched sub). Their sub-characters outlive the parent's turn:
+  // agentToolsClear must NOT remove them — despawning and re-creating moved the
+  // character to a new tile every turn. Cleared by subagentClear/agentClosed.
+  const backgroundParentToolIdsRef = useRef<Record<number, Set<string>>>({});
+
   useEffect(() => {
     // Buffer agents from existingAgents until layout is loaded
-    let pendingAgents: Array<{
-      id: number;
-      palette?: number;
-      hueShift?: number;
-      seatId?: string;
-      folderName?: string;
-    }> = [];
+    let pendingAgents: PendingAgent[] = [];
+
+    // Accumulate distinct folderNames seen across agents (never removed during the
+    // session): the source for the Areas folder-mapping dropdown, so a folder stays
+    // editable even after its agents close.
+    const noteFolderName = (name?: string) => {
+      if (!name) return;
+      setAgentFolderNames((prev) => (prev.includes(name) ? prev : [...prev, name]));
+    };
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const handler = (msg: any) => {
       const os = getOfficeState();
+      // CI / e2e diagnostic: record every received transport message on the
+      // window-side log. The fixture reads window.__pixelAgentsTestHooks.
+      // messageLog and attaches as JSON so CI failures can see the exact
+      // sequence of messages the webview actually processed. Gated on the e2e
+      // harness flag so this unbounded log never grows in a real session.
+      if (isE2E && typeof window !== 'undefined') {
+        if (!window.__pixelAgentsTestHooks) window.__pixelAgentsTestHooks = {};
+        if (!window.__pixelAgentsTestHooks.messageLog) {
+          window.__pixelAgentsTestHooks.messageLog = [];
+        }
+        window.__pixelAgentsTestHooks.messageLog.push({
+          at: Date.now(),
+          type: msg.type,
+          id: msg.id,
+          toolName: msg.toolName,
+          status: msg.status,
+          toolId: msg.toolId,
+          parentToolId: msg.parentToolId,
+        });
+      }
+
+      // Add a restored/existing agent's office character + apply its level.
+      // Used by the layoutLoaded flush and by existingAgents when the layout has
+      // already loaded — the standalone server sends layoutLoaded *before*
+      // existingAgents, so buffering-only would strand restored agents: they'd
+      // never reach OfficeState and the office would render no characters.
+      // Fork-side per-agent state that reconcileExistingAgents() doesn't carry:
+      // directory-scoped level and owning provider. Applied on both restore paths.
+      const applyAgentExtras = (id: number) => {
+        const cwd = agentCwdsRef.current[id];
+        if (cwd) syncCharacterLevel(os, id, directoryExpRef.current[cwd] ?? 0);
+        const provider = agentProvidersRef.current[id];
+        if (provider) {
+          const ch = os.characters.get(id);
+          if (ch) ch.provider = provider;
+        }
+      };
+
+      const addExistingAgent = (p: {
+        id: number;
+        palette?: number;
+        hueShift?: number;
+        seatId?: string;
+        folderName?: string;
+        isHeadless?: boolean;
+      }) => {
+        os.addAgent(p.id, p.palette, p.hueShift, p.seatId, true, p.folderName);
+        if (p.isHeadless) os.setHeadless(p.id, true);
+        applyAgentExtras(p.id);
+      };
 
       if (msg.type === 'providerCapabilities') {
         setProviderCapabilities({
+          providerId: msg.providerId,
           readingTools: msg.readingTools,
           subagentToolNames: msg.subagentToolNames,
         });
@@ -150,7 +266,7 @@ export function useExtensionMessages(
         }
         // Add buffered agents now that layout (and seats) are correct
         for (const p of pendingAgents) {
-          os.addAgent(p.id, p.palette, p.hueShift, p.seatId, true, p.folderName);
+          addExistingAgent(p);
         }
         pendingAgents = [];
         layoutReadyRef.current = true;
@@ -164,10 +280,12 @@ export function useExtensionMessages(
       } else if (msg.type === 'agentCreated') {
         const id = msg.id as number;
         const folderName = msg.folderName as string | undefined;
+        const cwd = msg.cwd as string | undefined;
         const isTeammate = msg.isTeammate as boolean | undefined;
         const teammateName = msg.teammateName as string | undefined;
         const teammateParentId = msg.parentAgentId as number | undefined;
         const teamName = msg.teamName as string | undefined;
+        const provider = msg.provider as string | undefined;
         setAgents((prev) => (prev.includes(id) ? prev : [...prev, id]));
         // Don't auto-select teammates (keep focus on lead)
         if (!isTeammate) {
@@ -176,10 +294,20 @@ export function useExtensionMessages(
         if (isTeammate && teammateParentId !== undefined) {
           // Teammate: inherit parent's palette and workspace folderName (teammate runs
           // in the same workspace as the lead). Name shown via agentName (teamRoleLabel).
+          // Seat them at the free seat closest to the lead so the team clusters.
           const parentCh = os.characters.get(teammateParentId);
           const palette = parentCh ? parentCh.palette : undefined;
           const hueShift = parentCh ? parentCh.hueShift : undefined;
-          os.addAgent(id, palette, hueShift, undefined, undefined, parentCh?.folderName);
+          os.addAgent(
+            id,
+            palette,
+            hueShift,
+            undefined,
+            undefined,
+            parentCh?.folderName,
+            teammateParentId,
+          );
+          noteFolderName(parentCh?.folderName);
           // Set team metadata on the character
           const ch = os.characters.get(id);
           if (ch) {
@@ -188,11 +316,26 @@ export function useExtensionMessages(
             ch.agentName = teammateName;
           }
         } else {
-          os.addAgent(id, undefined, undefined, undefined, undefined, folderName);
+          const palette = msg.palette as number | undefined;
+          const hueShift = msg.hueShift as number | undefined;
+          os.addAgent(id, palette, hueShift, undefined, undefined, folderName);
+          noteFolderName(folderName);
+          if (isHeadlessAgent(msg.isExternal as boolean | undefined)) {
+            os.setHeadless(id, true);
+          }
+        }
+        if (provider) {
+          const ch = os.characters.get(id);
+          if (ch) ch.provider = provider;
+        }
+        if (cwd) {
+          agentCwdsRef.current[id] = cwd;
+          syncCharacterLevel(os, id, directoryExpRef.current[cwd] ?? 0);
         }
         saveAgentSeats(os);
       } else if (msg.type === 'agentClosed') {
         const id = msg.id as number;
+        delete agentCwdsRef.current[id];
         setAgents((prev) => prev.filter((a) => a !== id));
         setSelectedAgent((prev) => (prev === id ? null : prev));
         setAgentTools((prev) => {
@@ -214,26 +357,46 @@ export function useExtensionMessages(
           return next;
         });
         // Remove all sub-agent characters belonging to this agent
+        delete backgroundParentToolIdsRef.current[id];
         os.removeAllSubagents(id);
         setSubagentCharacters((prev) => prev.filter((s) => s.parentAgentId !== id));
         os.removeAgent(id);
       } else if (msg.type === 'existingAgents') {
         const incoming = msg.agents as number[];
-        const meta = (msg.agentMeta || {}) as Record<
-          number,
-          { palette?: number; hueShift?: number; seatId?: string }
-        >;
+        const meta = (msg.agentMeta || {}) as Record<number, ExistingAgentMeta>;
         const folderNames = (msg.folderNames || {}) as Record<number, string>;
-        // Buffer agents — they'll be added in layoutLoaded after seats are built
+        const providers = (msg.providers || {}) as Record<number, string>;
+        for (const [idStr, provider] of Object.entries(providers)) {
+          if (provider) agentProvidersRef.current[Number(idStr)] = provider;
+        }
+        // Per-agent cwd for directory-scoped leveling (resolved server-side).
+        const cwds = (msg.cwds || {}) as Record<number, string>;
+        for (const [idStr, cwd] of Object.entries(cwds)) {
+          if (cwd) agentCwdsRef.current[Number(idStr)] = cwd;
+        }
+        const externalAgents = (msg.externalAgents || {}) as Record<number, boolean>;
+        const headlessAgents: Record<number, boolean> = {};
         for (const id of incoming) {
-          const m = meta[id];
-          pendingAgents.push({
-            id,
-            palette: m?.palette,
-            hueShift: m?.hueShift,
-            seatId: m?.seatId,
-            folderName: folderNames[id],
-          });
+          noteFolderName(folderNames[id]);
+          if (isHeadlessAgent(externalAgents[id])) headlessAgents[id] = true;
+        }
+        // Order-independent restore: add agents now if the layout (and its seats)
+        // is already built, otherwise buffer them for the next layoutLoaded.
+        // Depending on layoutLoaded always arriving last stranded restored agents
+        // on surfaces that send layout first (issue #334).
+        if (
+          reconcileExistingAgents(
+            os,
+            incoming,
+            meta,
+            folderNames,
+            layoutReadyRef.current,
+            pendingAgents,
+            headlessAgents,
+          )
+        ) {
+          for (const id of incoming) applyAgentExtras(id);
+          saveAgentSeats(os);
         }
         setAgents((prev) => {
           const ids = new Set(prev);
@@ -271,12 +434,37 @@ export function useExtensionMessages(
         // Create sub-agent character for Task/Agent tool subtasks.
         // agentToolStart for Task/Agent is always emitted via JSONL (with the stable
         // toolu_* id), never from the hook path — handlePreToolUse skips these tools.
-        // In tmux / inline teams mode, Agent tool has run_in_background=true -- those
-        // are handled via the independent teammate path (onTeammateDetected), not here.
-        // runInBackground gates them out so we don't create ghost sub-agents for them.
+        // runInBackground routing:
+        //   - parent HAS teamName: teammate path (onTeammateDetected) creates the
+        //     teammate; we skip here so we don't spawn a ghost sub-agent alongside.
+        //   - parent has NO teamName: no teammate path exists, so we must still
+        //     create the Subtask sub-character or the background task is invisible.
         const runInBackground = msg.runInBackground as boolean | undefined;
-        if (isSubagentToolName(toolName) && !runInBackground) {
-          const label = status.startsWith('Subtask:') ? status.slice('Subtask:'.length).trim() : '';
+        if (runInBackground) {
+          const set = (backgroundParentToolIdsRef.current[id] ??= new Set());
+          set.add(toolId);
+        }
+        // Named spawns are Teammates-to-be: a teammate character will represent
+        // them, so never create the Subtask ghost the teammate would replace.
+        const isTeammateSpawn = msg.isTeammateSpawn as boolean | undefined;
+        const parentChar = os.characters.get(id);
+        const parentHasTeam = !!parentChar?.teamName;
+        if (
+          isSubagentToolName(toolName) &&
+          !isTeammateSpawn &&
+          (!runInBackground || !parentHasTeam)
+        ) {
+          // Strip the "Subtask:" / "Agent:" verb prefix for display; fall back
+          // to the full status so labels are never empty (an Agent tool or a
+          // description-less Task would otherwise produce a blank tooltip).
+          let label = status.trim();
+          for (const prefix of ['Subtask:', 'Agent:']) {
+            if (label.startsWith(prefix)) {
+              label = label.slice(prefix.length).trim();
+              break;
+            }
+          }
+          if (!label) label = toolName === 'Agent' ? 'agent' : 'subtask';
           const subId = os.addSubagent(id, toolId);
           setSubagentCharacters((prev) => {
             if (prev.some((s) => s.id === subId)) return prev;
@@ -296,27 +484,51 @@ export function useExtensionMessages(
         });
       } else if (msg.type === 'agentToolsClear') {
         const id = msg.id as number;
+        const bgSet = backgroundParentToolIdsRef.current[id];
         setAgentTools((prev) => {
           if (!(id in prev)) return prev;
           const next = { ...prev };
           delete next[id];
           return next;
         });
+        // Keep sub-tool rows of live background spawns: their sub-characters
+        // survive the parent's turn end and stay animated by their own activity.
         setSubagentTools((prev) => {
-          if (!(id in prev)) return prev;
+          const agentSubs = prev[id];
+          if (!agentSubs) return prev;
+          const kept: Record<string, ToolActivity[]> = {};
+          for (const [parentToolId, rows] of Object.entries(agentSubs)) {
+            if (bgSet?.has(parentToolId)) kept[parentToolId] = rows;
+          }
           const next = { ...prev };
-          delete next[id];
+          if (Object.keys(kept).length === 0) {
+            delete next[id];
+          } else {
+            next[id] = kept;
+          }
           return next;
         });
-        // Remove all sub-agent characters belonging to this agent.
-        // Exception: team leads with inline teammates -- their sub-agents represent
-        // real teammates and should only be removed by SubagentStop/subagentClear.
+        // Remove this agent's sub-agent characters, EXCEPT:
+        // - team leads with inline teammates: their sub-agents represent real
+        //   teammates, removed only by SubagentStop/subagentClear;
+        // - live background spawns: removing + re-creating them on every turn
+        //   end teleported the character (subagentClear removes them for real).
         const clearCh = os.characters.get(id);
         const hasInlineTeammates =
           clearCh?.teamName && clearCh?.isTeamLead && !clearCh?.teamUsesTmux;
         if (!hasInlineTeammates) {
-          os.removeAllSubagents(id);
-          setSubagentCharacters((prev) => prev.filter((s) => s.parentAgentId !== id));
+          const doomed: string[] = [];
+          for (const meta of os.subagentMeta.values()) {
+            if (meta.parentAgentId === id && !bgSet?.has(meta.parentToolId)) {
+              doomed.push(meta.parentToolId);
+            }
+          }
+          for (const parentToolId of doomed) {
+            os.removeSubagent(id, parentToolId);
+          }
+          setSubagentCharacters((prev) =>
+            prev.filter((s) => s.parentAgentId !== id || bgSet?.has(s.parentToolId)),
+          );
         }
         os.setAgentTool(id, null);
         os.clearPermissionBubble(id);
@@ -336,8 +548,38 @@ export function useExtensionMessages(
           return { ...prev, [id]: status };
         });
         os.setAgentActive(id, status === 'active');
+        // Belt-and-suspenders: when the agent reports non-active, force all
+        // in-flight tool entries to done. Otherwise a missed agentToolDone
+        // (truncated JSONL, dropped hook event, tool_id mismatch) leaves
+        // a !done entry that getActivityText still treats as "active" and
+        // displays its stale status indefinitely until the next TurnEnd.
+        if (status !== 'active') {
+          setAgentTools((prev) => {
+            const list = prev[id];
+            if (!list || !list.some((t) => !t.done)) return prev;
+            return {
+              ...prev,
+              [id]: list.map((t) => (t.done ? t : { ...t, done: true })),
+            };
+          });
+          setSubagentTools((prev) => {
+            const agentSubs = prev[id];
+            if (!agentSubs) return prev;
+            let changed = false;
+            const nextSubs: typeof agentSubs = {};
+            for (const [parent, list] of Object.entries(agentSubs)) {
+              if (list.some((t) => !t.done)) {
+                changed = true;
+                nextSubs[parent] = list.map((t) => (t.done ? t : { ...t, done: true }));
+              } else {
+                nextSubs[parent] = list;
+              }
+            }
+            return changed ? { ...prev, [id]: nextSubs } : prev;
+          });
+        }
         if (status === 'waiting') {
-          os.showWaitingBubble(id);
+          os.showWaitingBubble(id, msg.awaitingInput === true);
           playDoneSound();
         }
       } else if (msg.type === 'agentToolPermission') {
@@ -393,15 +635,27 @@ export function useExtensionMessages(
             [id]: { ...agentSubs, [parentToolId]: [...list, { toolId, status, done: false }] },
           };
         });
-        // Update sub-agent character's tool and active state. The sub-agent was
-        // created by an earlier agentToolStart from JSONL using the same (real)
-        // parentToolId, so this lookup resolves.
-        const subId = os.getSubagentId(id, parentToolId);
-        if (subId !== null) {
-          const subToolName = extractToolName(status);
-          os.setAgentTool(subId, subToolName);
-          os.setAgentActive(subId, true);
+        // Update sub-agent character's tool and active state. The sub-agent is
+        // usually created by an earlier agentToolStart from JSONL using the same
+        // (real) parentToolId. When it's missing — a teamed lead's background
+        // spawn (the creation gate above suppressed the Subtask) or a reloaded
+        // panel that lost it — create it lazily; addSubagent is idempotent.
+        let subId = os.getSubagentId(id, parentToolId);
+        if (subId === null) {
+          subId = os.addSubagent(id, parentToolId);
+          const newSubId = subId;
+          setSubagentCharacters((prev) => {
+            if (prev.some((s) => s.id === newSubId)) return prev;
+            return [...prev, { id: newSubId, parentAgentId: id, parentToolId, label: '' }];
+          });
+          // Only watched background spawns are created lazily -- mark the
+          // parent tool as background so agentToolsClear preserves the sub.
+          const set = (backgroundParentToolIdsRef.current[id] ??= new Set());
+          set.add(parentToolId);
         }
+        const subToolName = extractToolName(status);
+        os.setAgentTool(subId, subToolName);
+        os.setAgentActive(subId, true);
       } else if (msg.type === 'subagentToolDone') {
         const id = msg.id as number;
         const parentToolId = msg.parentToolId as string;
@@ -422,6 +676,7 @@ export function useExtensionMessages(
       } else if (msg.type === 'subagentClear') {
         const id = msg.id as number;
         const parentToolId = msg.parentToolId as string;
+        backgroundParentToolIdsRef.current[id]?.delete(parentToolId);
         setSubagentTools((prev) => {
           const agentSubs = prev[id];
           if (!agentSubs || !(parentToolId in agentSubs)) return prev;
@@ -447,6 +702,23 @@ export function useExtensionMessages(
         }>;
         console.log(`[Webview] Received ${characters.length} pre-colored character sprites`);
         setCharacterTemplates(characters);
+      } else if (msg.type === 'petSpritesLoaded') {
+        const pets = msg.pets;
+        if (!Array.isArray(pets)) {
+          return;
+        }
+        const petNames = Array.isArray(msg.petNames) ? (msg.petNames as string[]) : undefined;
+        console.log(`[Webview] Received ${pets.length} pet sprites`);
+        setPetTemplates(
+          pets as Array<{
+            walkDown: string[][][];
+            idleDown: string[][][];
+            walkUp: string[][][];
+            idleUp: string[][][];
+            walkRight: string[][][];
+          }>,
+          petNames,
+        );
       } else if (msg.type === 'floorTilesLoaded') {
         const sprites = msg.sprites as string[][][];
         console.log(`[Webview] Received ${sprites.length} floor tile patterns`);
@@ -455,6 +727,14 @@ export function useExtensionMessages(
         const sets = msg.sets as string[][][][];
         console.log(`[Webview] Received ${sets.length} wall tile set(s)`);
         setWallSprites(sets);
+      } else if (msg.type === 'carpetTilesLoaded') {
+        const sets = msg.sets as string[][][][];
+        console.log(`[Webview] Received ${sets.length} carpet variant(s)`);
+        setCarpetSprites(sets);
+      } else if (msg.type === 'areaMappingsLoaded') {
+        const mappings = (msg.mappings ?? {}) as Record<string, string[]>;
+        setAreaMappings(mappings);
+        os.setAreaMappings(mappings);
       } else if (msg.type === 'workspaceFolders') {
         const folders = msg.folders as WorkspaceFolder[];
         setWorkspaceFolders(folders);
@@ -467,11 +747,17 @@ export function useExtensionMessages(
         if (typeof msg.alwaysShowLabels === 'boolean') {
           setAlwaysShowLabels(msg.alwaysShowLabels as boolean);
         }
+        if (typeof msg.ghostHeadlessAgents === 'boolean') {
+          applyGhostHeadlessAgents(msg.ghostHeadlessAgents as boolean);
+        }
         if (typeof msg.hooksEnabled === 'boolean') {
           setHooksEnabled(msg.hooksEnabled as boolean);
         }
         if (typeof msg.hooksInfoShown === 'boolean') {
           setHooksInfoShown(msg.hooksInfoShown as boolean);
+        }
+        if (typeof msg.showAreas === 'boolean') {
+          setShowAreas(msg.showAreas as boolean);
         }
         if (Array.isArray(msg.externalAssetDirectories)) {
           setExternalAssetDirectories(msg.externalAssetDirectories as string[]);
@@ -485,6 +771,29 @@ export function useExtensionMessages(
       } else if (msg.type === 'externalAssetDirectoriesUpdated') {
         if (Array.isArray(msg.dirs)) {
           setExternalAssetDirectories(msg.dirs as string[]);
+        }
+      } else if (msg.type === 'directoryExpAll') {
+        const stats = (msg.stats as Record<string, number>) ?? {};
+        directoryExpRef.current = { ...stats };
+        for (const [idStr, cwd] of Object.entries(agentCwdsRef.current)) {
+          syncCharacterLevel(os, Number(idStr), stats[cwd] ?? 0);
+        }
+      } else if (msg.type === 'directoryExp') {
+        const dir = msg.directory as string;
+        const totalExp = msg.totalExp as number;
+        directoryExpRef.current[dir] = totalExp;
+        for (const [idStr, cwd] of Object.entries(agentCwdsRef.current)) {
+          if (cwd === dir) {
+            syncCharacterLevel(os, Number(idStr), totalExp);
+          }
+        }
+      } else if (msg.type === 'agentCwd') {
+        // Server resolved an agent's working directory (drives directory-scoped leveling).
+        const id = msg.id as number;
+        const cwd = msg.cwd as string | undefined;
+        if (cwd) {
+          agentCwdsRef.current[id] = cwd;
+          syncCharacterLevel(os, id, directoryExpRef.current[cwd] ?? 0);
         }
       } else if (msg.type === 'furnitureAssetsLoaded') {
         try {
@@ -507,9 +816,9 @@ export function useExtensionMessages(
           msg.leadAgentId as number | undefined,
           msg.teamUsesTmux as boolean | undefined,
         );
-      } else if (msg.type === 'agentTokenUsage') {
+      } else if (msg.type === 'agentContextUsage') {
         const id = msg.id as number;
-        os.setAgentTokens(id, msg.inputTokens as number, msg.outputTokens as number);
+        os.setAgentContext(id, msg.contextTokens as number, msg.maxContextTokens as number);
       }
     };
     const unsubscribe = transport.onMessage(handler);
@@ -517,6 +826,21 @@ export function useExtensionMessages(
     return unsubscribe;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [getOfficeState]);
+
+  // Idle sub-agent characters between their turns: when every tracked tool row
+  // for a sub is done, stop its typing animation (a later subagentToolStart
+  // reactivates it). Watched background sub-agents get a synthesized done for
+  // each live tool at their turn end, so they sit idle instead of typing forever.
+  useEffect(() => {
+    const os = getOfficeState();
+    for (const sub of subagentCharacters) {
+      const rows = subagentTools[sub.parentAgentId]?.[sub.parentToolId];
+      if (rows && rows.length > 0 && rows.every((t) => t.done)) {
+        os.setAgentTool(sub.id, null);
+        os.setAgentActive(sub.id, false);
+      }
+    }
+  }, [subagentTools, subagentCharacters, getOfficeState]);
 
   return {
     agents,
@@ -529,14 +853,21 @@ export function useExtensionMessages(
     layoutWasReset,
     loadedAssets,
     workspaceFolders,
+    agentFolderNames,
     externalAssetDirectories,
     lastSeenVersion,
     extensionVersion,
     watchAllSessions,
     setWatchAllSessions,
     alwaysShowLabels,
+    ghostHeadlessAgents,
+    setGhostHeadlessAgents: applyGhostHeadlessAgents,
     hooksEnabled,
     setHooksEnabled,
     hooksInfoShown,
+    areaMappings,
+    setAreaMappings,
+    showAreas,
+    setShowAreas,
   };
 }

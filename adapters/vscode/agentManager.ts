@@ -4,8 +4,9 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 
 import type { StateAdapter } from '../../core/src/adapter.js';
+import { resendAgentActivity } from '../../server/src/agentActivityResend.js';
 import { AgentStateStore } from '../../server/src/agentStateStore.js';
-import { JSONL_POLL_INTERVAL_MS } from '../../server/src/constants.js';
+import { DEFAULT_MAX_CONTEXT_TOKENS, JSONL_POLL_INTERVAL_MS } from '../../server/src/constants.js';
 import {
   ensureProjectScan,
   readNewLines,
@@ -13,6 +14,7 @@ import {
   startFileWatching,
 } from '../../server/src/fileWatcher.js';
 import { loadLayout } from '../../server/src/layoutPersistence.js';
+import { assignPaletteIfNeeded } from '../../server/src/paletteAssigner.js';
 import { CLAUDE_TERMINAL_NAME_PREFIX } from '../../server/src/providers/hook/claude/constants.js';
 import { claudeProvider } from '../../server/src/providers/index.js';
 import { cancelPermissionTimer, cancelWaitingTimer } from '../../server/src/timerManager.js';
@@ -83,7 +85,15 @@ export async function launchNewTerminal(
 
   // Create agent immediately (before JSONL file exists)
   const id = nextAgentIdRef.current++;
-  const folderName = isMultiRoot && cwd ? path.basename(cwd) : undefined;
+  // areaMappings is keyed by WorkspaceFolder.name, which can differ from the dir
+  // basename, so seat placement needs that name. Pick the most specific containing
+  // folder (longest path wins for nested folders).
+  const owningFolder = (folders ?? [])
+    .filter((f) => cwd === f.uri.fsPath || cwd.startsWith(f.uri.fsPath + path.sep))
+    .sort((a, b) => b.uri.fsPath.length - a.uri.fsPath.length)[0];
+  const folderName = isMultiRoot
+    ? (owningFolder?.name ?? (cwd ? path.basename(cwd) : undefined))
+    : undefined;
   const agent: AgentState = {
     id,
     sessionId,
@@ -109,8 +119,11 @@ export async function launchNewTerminal(
     hookDelivered: false,
     inputTokens: 0,
     outputTokens: 0,
+    contextTokens: 0,
+    maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
   };
 
+  assignPaletteIfNeeded(agent, agents);
   agents.set(id, agent);
   activeAgentIdRef.current = id;
   persistAgents();
@@ -254,9 +267,20 @@ export function removeAgent(
   store.persist();
 }
 
+/**
+ * Reference implementation of the AgentState → PersistedAgent projection: it shows
+ * exactly which fields survive a reload. Kept as the worked example for adapters that
+ * persist through a StateAdapter directly; AgentStateStore.persist() is what the
+ * VS Code surface calls at runtime.
+ *
+ * @public
+ */
 export function persistAgents(agents: AgentStateStore, adapter: StateAdapter): void {
   const persisted: PersistedAgent[] = [];
   for (const agent of agents.values()) {
+    // Background-spawn children are derived state — never persisted (the 1s
+    // scan re-materializes them from sidecars after a restore).
+    if (agent.spawnToolUseId) continue;
     persisted.push({
       id: agent.id,
       sessionId: agent.sessionId,
@@ -265,11 +289,15 @@ export function persistAgents(agents: AgentStateStore, adapter: StateAdapter): v
       jsonlFile: agent.jsonlFile,
       projectDir: agent.projectDir,
       folderName: agent.folderName,
+      provider: agent.providerId,
+      personaKey: agent.personaKey,
       teamName: agent.teamName,
       agentName: agent.agentName,
       isTeamLead: agent.isTeamLead,
       leadAgentId: agent.leadAgentId,
       teamUsesTmux: agent.teamUsesTmux,
+      backgroundAgentToolIds:
+        agent.backgroundAgentToolIds.size > 0 ? [...agent.backgroundAgentToolIds] : undefined,
     });
   }
   adapter.saveAgents(persisted);
@@ -297,6 +325,13 @@ export function restoreAgents(
   let maxIdx = 0;
   let restoredProjectDir: string | null = null;
 
+  // IDs of agents we ACTUALLY restored in this call (newly added to the store).
+  // The cleanup pass below targets only these; pre-existing agents (e.g., a
+  // freshly launched one whose webview just remounted and re-fired
+  // webviewReady) must not be culled by this restore-time grace period, since
+  // their JSONL may still be on its way (heuristic /resume path waits ~11s).
+  const justRestoredTerminalIds: number[] = [];
+
   for (const p of persisted) {
     // Skip agents already in the map — prevents duplicate file watchers on re-entry
     // (webviewReady fires on every panel focus, re-calling restoreAgents each time)
@@ -304,6 +339,11 @@ export function restoreAgents(
       knownJsonlFiles.add(p.jsonlFile);
       continue;
     }
+
+    // Background-spawn children (a leadAgentId but no teamName) are derived
+    // state re-materialized by the 1s scan — never restored directly (also
+    // skips stale entries written by older builds that persisted them).
+    if (p.leadAgentId !== undefined && !p.teamName) continue;
 
     let terminal: vscode.Terminal | undefined;
     const isExternal = p.isExternal ?? false;
@@ -335,24 +375,39 @@ export function restoreAgents(
       activeToolNames: new Map(),
       activeSubagentToolIds: new Map(),
       activeSubagentToolNames: new Map(),
-      backgroundAgentToolIds: new Set(),
+      // Live spawn ids survive the reload so the 1s scan can re-adopt the
+      // spawns' transcripts and the completion queue-op still matches.
+      backgroundAgentToolIds: new Set(p.backgroundAgentToolIds ?? []),
       isWaiting: false,
       permissionSent: false,
       hadToolsInTurn: false,
       lastDataAt: 0,
       linesProcessed: 0,
       seenUnknownRecordTypes: new Set(),
+      // Persisted cwd (provider-agnostic; non-Claude transcripts aren't parseable
+      // by readCwdFromJsonl's Claude shape). transcriptParser still resolves it
+      // lazily from the JSONL when absent (legacy persisted agents).
+      cwd: p.cwd,
       folderName: p.folderName,
       hookDelivered: false,
+      providerId: p.provider,
+      personaKey: p.personaKey,
       inputTokens: 0,
       outputTokens: 0,
+      contextTokens: 0,
+      maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
       teamName: p.teamName,
       agentName: p.agentName,
-      isTeamLead: p.isTeamLead,
+      // A named agent is a teammate; never restore it as a lead (guards against
+      // state persisted before linkTeammates stopped promoting teammates).
+      isTeamLead: p.agentName ? undefined : p.isTeamLead,
       leadAgentId: p.leadAgentId,
       teamUsesTmux: p.teamUsesTmux,
+      palette: p.palette,
+      hueShift: p.hueShift,
     };
 
+    assignPaletteIfNeeded(agent, store);
     store.set(p.id, agent);
     knownJsonlFiles.add(p.jsonlFile);
     if (isExternal) {
@@ -363,6 +418,7 @@ export function restoreAgents(
       console.log(
         `[Pixel Agents] Terminal: Agent ${p.id} - restored → terminal "${p.terminalName}"`,
       );
+      justRestoredTerminalIds.push(p.id);
     }
 
     if (p.id > maxId) maxId = p.id;
@@ -420,15 +476,15 @@ export function restoreAgents(
     }
   }
 
-  // After a short delay, remove restored terminal agents that never received data.
-  // These are dead terminals restored by VS Code (e.g., after /clear or restart)
-  // where Claude is no longer running.
-  const restoredTerminalIds = [...store.entries()]
-    .filter(([, a]) => !a.isExternal && a.terminalRef)
-    .map(([id]) => id);
-  if (restoredTerminalIds.length > 0) {
+  // After a short delay, remove terminal agents that we JUST restored from
+  // workspaceState and which never received data. These are dead terminals
+  // restored by VS Code (e.g., after a window reload) where Claude is no
+  // longer running. Only target the IDs the loop above actually added — never
+  // pre-existing agents from launchNewTerminal in the same session whose
+  // expected JSONL may still be on its way (heuristic /resume waits ~11s).
+  if (justRestoredTerminalIds.length > 0) {
     setTimeout(() => {
-      for (const id of restoredTerminalIds) {
+      for (const id of justRestoredTerminalIds) {
         const agent = store.get(id);
         if (agent && !agent.isExternal && agent.linesProcessed === 0) {
           console.log(
@@ -504,6 +560,9 @@ export function sendExistingAgents(
       externalAgents[id] = true;
     }
   }
+  const providers = Object.fromEntries(
+    [...agents].map(([id, a]) => [id, a.providerId ?? 'claude']),
+  );
   console.log(
     `[Pixel Agents] sendExistingAgents: agents=${JSON.stringify(agentIds)}, meta=${JSON.stringify(agentMeta)}`,
   );
@@ -514,6 +573,7 @@ export function sendExistingAgents(
     agentMeta,
     folderNames,
     externalAgents,
+    providers,
   });
   // Note: sendCurrentAgentStatuses is called separately AFTER layoutLoaded
   // so that agentStatus/agentToolStart messages arrive after characters are created.
@@ -524,48 +584,7 @@ export function sendCurrentAgentStatuses(
   webview: vscode.Webview | undefined,
 ): void {
   if (!webview) return;
-  for (const [agentId, agent] of agents) {
-    // Re-send active tools
-    for (const [toolId, status] of agent.activeToolStatuses) {
-      const toolName = agent.activeToolNames.get(toolId) ?? '';
-      webview.postMessage({
-        type: 'agentToolStart',
-        id: agentId,
-        toolId,
-        status,
-        toolName,
-      });
-    }
-    // Re-send waiting status
-    if (agent.isWaiting) {
-      webview.postMessage({
-        type: 'agentStatus',
-        id: agentId,
-        status: 'waiting',
-      });
-    }
-    // Re-send team metadata
-    if (agent.teamName) {
-      webview.postMessage({
-        type: 'agentTeamInfo',
-        id: agentId,
-        teamName: agent.teamName,
-        agentName: agent.agentName,
-        isTeamLead: agent.isTeamLead,
-        leadAgentId: agent.leadAgentId,
-        teamUsesTmux: agent.teamUsesTmux,
-      });
-    }
-    // Re-send token usage
-    if (agent.inputTokens > 0 || agent.outputTokens > 0) {
-      webview.postMessage({
-        type: 'agentTokenUsage',
-        id: agentId,
-        inputTokens: agent.inputTokens,
-        outputTokens: agent.outputTokens,
-      });
-    }
-  }
+  resendAgentActivity((msg) => webview.postMessage(msg), agents);
 }
 
 export function sendLayout(

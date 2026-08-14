@@ -10,7 +10,7 @@ function createMockAdapter(): StateAdapter {
     saveAgents: vi.fn(),
     loadSeats: vi.fn(() => ({})),
     saveSeats: vi.fn(),
-    getSetting: vi.fn(<T>(_k: string, d: T): T => d),
+    getSetting: <T>(_k: string, d: T): T => d,
     setSetting: vi.fn<(key: string, value: unknown) => void>(),
   };
 }
@@ -38,8 +38,8 @@ function createTestAgent(overrides: Partial<AgentState> = {}): AgentState {
     linesProcessed: 0,
     seenUnknownRecordTypes: new Set(),
     hookDelivered: false,
-    inputTokens: 0,
-    outputTokens: 0,
+    contextTokens: 0,
+    maxContextTokens: 200_000,
     ...overrides,
   } as AgentState;
 }

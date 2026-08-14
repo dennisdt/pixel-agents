@@ -1,4 +1,5 @@
 import {
+  DEFAULT_MAX_CONTEXT_TOKENS,
   SEAT_REST_MAX_SEC,
   SEAT_REST_MIN_SEC,
   TYPE_FRAME_DURATION_SEC,
@@ -11,7 +12,7 @@ import {
 } from '../../constants.js';
 import { findPath } from '../layout/tileMap.js';
 import type { CharacterSprites } from '../sprites/spriteData.js';
-import { isReadingToolName } from '../toolUtils.js';
+import { getAuraForLevel, isReadingToolName } from '../toolUtils.js';
 import type { Character, Seat, SpriteData, TileType as TileTypeVal } from '../types.js';
 import { CharacterState, Direction, TILE_SIZE } from '../types.js';
 
@@ -83,8 +84,12 @@ export function createCharacter(
     matrixEffect: null,
     matrixEffectTimer: 0,
     matrixEffectSeeds: [],
+    contextTokens: 0,
+    maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
     inputTokens: 0,
     outputTokens: 0,
+    level: 1,
+    auraTimer: 0,
   };
 }
 
@@ -97,6 +102,11 @@ export function updateCharacter(
   blockedTiles: Set<string>,
 ): void {
   ch.frameTimer += dt;
+  // Advance aura timer only for characters that can actually render one —
+  // sub-agents never get auras, and levels below the first tier have none.
+  if (!ch.isSubagent && getAuraForLevel(ch.level ?? 0)) {
+    ch.auraTimer = (ch.auraTimer ?? 0) + dt;
+  }
 
   switch (ch.state) {
     case CharacterState.TYPE: {

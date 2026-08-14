@@ -1,27 +1,29 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { PersistedAgent } from '../../core/src/schemas.js';
-import { FileStateAdapter } from '../src/fileStateAdapter.js';
+
+// Mock os.homedir() so the adapter resolves to an isolated temp dir on every
+// platform. Overriding process.env.HOME is not portable: os.homedir() reads
+// USERPROFILE on Windows, so a HOME-only override would still hit the real
+// home directory.
+let tempHome: string;
+vi.mock('os', async () => {
+  const actual = await vi.importActual<typeof import('os')>('os');
+  return { ...actual, homedir: () => tempHome };
+});
+
+// Must import AFTER mock setup.
+const { FileStateAdapter } = await import('../src/fileStateAdapter.js');
 
 describe('FileStateAdapter', () => {
-  let tempHome: string;
-  let originalHome: string | undefined;
-
   beforeEach(() => {
     tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-adapter-test-'));
-    originalHome = process.env.HOME;
-    process.env.HOME = tempHome;
   });
 
   afterEach(() => {
-    if (originalHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = originalHome;
-    }
     fs.rmSync(tempHome, { recursive: true, force: true });
   });
 
@@ -32,9 +34,10 @@ describe('FileStateAdapter', () => {
     expect(adapter.getSetting('pixel-agents.soundEnabled', false)).toBe(true);
     expect(adapter.getSetting('pixel-agents.watchAllSessions', true)).toBe(false);
     expect(adapter.getSetting('pixel-agents.lastSeenVersion', 'x')).toBe('');
+    expect(adapter.getSetting('pixel-agents.hermesEnabled', true)).toBe(false);
   });
 
-  it('round-trips each of the 6 setting keys', () => {
+  it('round-trips each of the 7 setting keys', () => {
     const adapter = new FileStateAdapter({ namespace: 'standalone' });
 
     adapter.setSetting('pixel-agents.soundEnabled', false);
@@ -43,6 +46,7 @@ describe('FileStateAdapter', () => {
     adapter.setSetting('pixel-agents.watchAllSessions', true);
     adapter.setSetting('pixel-agents.hooksEnabled', false);
     adapter.setSetting('pixel-agents.hooksInfoShown', true);
+    adapter.setSetting('pixel-agents.hermesEnabled', true);
 
     expect(adapter.getSetting('pixel-agents.soundEnabled', true)).toBe(false);
     expect(adapter.getSetting('pixel-agents.lastSeenVersion', '')).toBe('1.3');
@@ -50,6 +54,7 @@ describe('FileStateAdapter', () => {
     expect(adapter.getSetting('pixel-agents.watchAllSessions', false)).toBe(true);
     expect(adapter.getSetting('pixel-agents.hooksEnabled', true)).toBe(false);
     expect(adapter.getSetting('pixel-agents.hooksInfoShown', false)).toBe(true);
+    expect(adapter.getSetting('pixel-agents.hermesEnabled', false)).toBe(true);
   });
 
   it('vscode and standalone namespaces are isolated in config.json', () => {

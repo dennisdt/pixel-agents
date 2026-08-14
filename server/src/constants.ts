@@ -25,15 +25,42 @@ export const EXTERNAL_ACTIVE_THRESHOLD_MS = 120_000; // 2 minutes
 /** Remove external agents after this much inactivity */
 // export const EXTERNAL_STALE_TIMEOUT_MS = 300_000; // 5 minutes - deprecated
 export const EXTERNAL_STALE_CHECK_INTERVAL_MS = 30_000;
+/** Staleness window for non-primary-provider agents (Codex, ...) in
+ *  startStaleExternalAgentCheck's hooks-mode branch. EXTERNAL_ACTIVE_THRESHOLD_MS
+ *  (2 min) is tuned for scanners that pair mtime with process-liveness
+ *  (scanExternalDir, startProcessScan) -- a non-primary provider has no such
+ *  pairing here, and its transcript can go quiet between turns even while the
+ *  session is alive (e.g. a Codex rollout file gets no writes while the user
+ *  is composing). 30 minutes gives a live-but-idle session room to breathe
+ *  without being reaped mid-conversation. */
+export const NON_PRIMARY_STALE_TIMEOUT_MS = 1_800_000; // 30 minutes
 /** Cooldown after user closes an agent via X. Must be > EXTERNAL_ACTIVE_THRESHOLD_MS
  *  so the file's mtime becomes stale before the dismissal expires. */
 export const DISMISSED_COOLDOWN_MS = 180_000; // 3 minutes
+
+// ── Context Window Usage ────────────────────────────────────
+/** Window size assumed until a transcript proves otherwise. Transcripts never
+ *  state the model's context limit, so this is the floor, not the truth. */
+export const DEFAULT_MAX_CONTEXT_TOKENS = 200_000;
+/** Known window sizes, ascending. The smallest tier that fits the largest
+ *  context observed so far wins; beyond the last tier we round up to a whole
+ *  multiple of it, so an unknown future window still reads under 100%. */
+export const CONTEXT_WINDOW_TIERS = [200_000, 1_000_000] as const;
+/** How much of a transcript's tail to read when seeding an agent's context on
+ *  adoption or restore. Comfortably more than one turn's worth of records. */
+export const CONTEXT_SEED_TAIL_BYTES = 256 * 1024;
 
 // ── Global Session Scanning ─────────────────────────────────
 /** Only adopt global JSONL files larger than this (filters out empty/init-only sessions) */
 export const GLOBAL_SCAN_ACTIVE_MIN_SIZE = 3_072; // 3KB
 /** Only adopt global JSONL files modified within this window */
 export const GLOBAL_SCAN_ACTIVE_MAX_AGE_MS = 600_000; // 10 minutes
+
+// ── Process Liveness Scanning (watchAllSessions) ────────────
+/** How often to enumerate running `claude` processes (adopts idle-but-alive sessions). */
+export const PROCESS_SCAN_INTERVAL_MS = 5_000;
+/** Consecutive process scans with no live process (and a stale file) before removing an agent. */
+export const PROCESS_SCAN_REMOVE_STRIKES = 2;
 
 // ── Display Truncation + Pixel Agents Server paths ──────────
 // Centralized in core/src/constants.ts; re-exported here for back-compat.
@@ -45,6 +72,22 @@ export {
   SERVER_JSON_NAME,
   TASK_DESCRIPTION_DISPLAY_MAX_LENGTH,
 } from '../../core/src/constants.js';
+
+// ── Multi-Server Discovery ──────────────────────────────────
+/** Subdirectory (under SERVER_JSON_DIR) holding one registry entry per live
+ *  server, so a hook event can fan out to every running instance instead of
+ *  only the single legacy server.json pointer. See server/src/server.ts. */
+export const SERVERS_DIR = 'servers';
+/** Valid explicit TCP port range. Port 0 remains an internal-only signal for
+ *  OS-assigned ephemeral binding and is never accepted from persisted records
+ *  or the CLI's --port option. */
+export const MIN_PORT = 1;
+export const MAX_PORT = 65_535;
+/** Format version stamped on every registry entry (both the per-server records
+ *  and the legacy server.json). Bump on breaking field changes; additive
+ *  fields (servesSpa, protocol itself) don't require a bump -- readers already
+ *  tolerate unknown/missing fields (see ServerConfig.debugLog precedent). */
+export const SERVER_REGISTRY_PROTOCOL_VERSION = 1;
 
 export const HOOK_EVENT_BUFFER_MS = 5_000;
 /** Grace period after SessionEnd(reason=clear/resume) before triggering onSessionEnd.
@@ -60,3 +103,14 @@ export const LAYOUT_FILE_NAME = 'layout.json';
 export const LAYOUT_FILE_POLL_INTERVAL_MS = 2000;
 export const LAYOUT_REVISION_KEY = 'layoutRevision';
 export const CONFIG_FILE_NAME = 'config.json';
+
+// ── Avatar Customization ────────────────────────────────────
+/** Number of pre-colored bundled character palettes (char_0.png–char_5.png).
+ *  Mirrors `PALETTE_COUNT` in webview-ui/src/constants.ts; kept separate
+ *  because the server has no DOM/sprite access and cannot import the webview
+ *  constant. The two values must stay in sync. */
+export const PALETTE_COUNT = 6;
+/** Inclusive upper bound for a valid agent hue shift, in degrees. Used by
+ *  clientMessageHandler to guard saveAgentSeats payloads from a remote or
+ *  hand-edited source corrupting the stored values with out-of-range values. */
+export const HUE_SHIFT_MAX_DEG = 360;

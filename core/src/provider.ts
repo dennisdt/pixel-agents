@@ -23,7 +23,14 @@ export type AgentEvent =
       runInBackground?: boolean;
     }
   | { kind: 'toolEnd'; toolId: string }
-  | { kind: 'turnEnd' }
+  | {
+      kind: 'turnEnd';
+      /** True when the turn ended because the agent went idle waiting on the
+       *  user (Claude's Notification(idle_prompt)) rather than simply finishing
+       *  its response (Stop). Drives the "Waiting for input" vs "Done" label.
+       *  Absent/false = the agent finished its turn (Done). */
+      awaitingInput?: boolean;
+    }
   | {
       kind: 'subagentStart';
       parentToolId: string;
@@ -66,6 +73,13 @@ export interface HookProvider {
    *  / TeamProvider / HookProvider. Start at 1. */
   readonly protocolVersion: number;
 
+  /** Whether the provider's sessions are backed by a transcript file on disk
+   *  (Claude: true). File-based sessions are adopted and reaped via their
+   *  transcript; a SessionStart without a transcript_path is a transient run we
+   *  must NOT adopt (it would create an un-reapable, transcript-less agent).
+   *  Set false only for providers that emit state purely through hooks. */
+  readonly usesTranscriptFile: boolean;
+
   /** Normalize a raw hook event payload into an AgentEvent.
    *  Each CLI sends different JSON (Claude: snake_case, Copilot: camelCase, etc.)
    *  The provider translates to the common AgentEvent format.
@@ -95,6 +109,14 @@ export interface HookProvider {
   /** Terminal name prefix used when launching this CLI. Used by the extension to
    *  match VS Code terminals to agents for heuristic adoption. */
   readonly terminalNamePrefix?: string;
+
+  /** Context window, in tokens, for a model id this CLI reports in its
+   *  transcripts. Transcripts state token usage but never the limit it counts
+   *  against, so only the provider can say — and getting it wrong is visible:
+   *  the office renders usage/window as a context gauge over every character.
+   *  Return undefined for an unrecognized model; the runtime then keeps its
+   *  previous estimate and widens it if a context ever exceeds it. */
+  contextWindowForModel?(model: string | undefined): number | undefined;
 
   // ── Optional file fallback (heuristic mode) ──
 

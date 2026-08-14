@@ -10,6 +10,7 @@ import {
 } from '../../constants.js';
 import { unlockAudio } from '../../notificationSound.js';
 import { transport } from '../../transport/index.js';
+import { getColorizedSprite } from '../colorize.js';
 import { canPlaceFurniture, getWallPlacementRow } from '../editor/editorActions.js';
 import type { EditorState } from '../editor/editorState.js';
 import { startGameLoop } from '../engine/gameLoop.js';
@@ -23,6 +24,7 @@ import type {
 import { renderFrame } from '../engine/renderer.js';
 import { getCatalogEntry, isRotatable } from '../layout/furnitureCatalog.js';
 import { EditTool, TILE_SIZE } from '../types.js';
+import { computeNormalModeCursor } from './officeCanvasCursor.js';
 
 interface OfficeCanvasProps {
   officeState: OfficeState;
@@ -39,6 +41,10 @@ interface OfficeCanvasProps {
   zoom: number;
   onZoomChange: (zoom: number) => void;
   panRef: React.MutableRefObject<{ x: number; y: number }>;
+  /** Whether the area overlay + labels should render (settings toggle OR active edit). */
+  showAreas: boolean;
+  /** Currently-selected area label in the editor (alpha-bumped overlay). null otherwise. */
+  activeAreaLabel: string | null;
 }
 
 export function OfficeCanvas({
@@ -56,6 +62,8 @@ export function OfficeCanvas({
   zoom,
   onZoomChange,
   panRef,
+  showAreas,
+  activeAreaLabel,
 }: OfficeCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -90,6 +98,18 @@ export function OfficeCanvas({
     },
     [officeState, zoom],
   );
+
+  // Live mirrors of props/state the once-registered native touch listener reads,
+  // so it never has to re-register. didPanRef swallows the click after a drag.
+  const didPanRef = useRef(false);
+  const zoomRef = useRef(zoom);
+  zoomRef.current = zoom;
+  const isEditModeRef = useRef(isEditMode);
+  isEditModeRef.current = isEditMode;
+  const onZoomChangeRef = useRef(onZoomChange);
+  onZoomChangeRef.current = onZoomChange;
+  const clampPanRef = useRef(clampPan);
+  clampPanRef.current = clampPan;
 
   // Resize canvas backing store to device pixels (no DPR transform on ctx)
   const resizeCanvas = useCallback(() => {
@@ -160,7 +180,14 @@ export function OfficeCanvas({
                 editorState.selectedFurnitureType,
                 editorState.ghostRow,
               );
-              editorRender.ghostSprite = entry.sprite;
+              const pickedColor = editorState.pickedFurnitureColor;
+              editorRender.ghostSprite = pickedColor
+                ? getColorizedSprite(
+                    `ghost-${editorState.selectedFurnitureType}-${pickedColor.h}-${pickedColor.s}-${pickedColor.b}-${pickedColor.c}-${pickedColor.colorize ?? ''}`,
+                    entry.sprite,
+                    pickedColor,
+                  )
+                : entry.sprite;
               editorRender.ghostRow = placementRow;
               editorRender.ghostMirrored =
                 !!entry.mirrorSide && editorState.selectedFurnitureType.endsWith(':left');
@@ -252,6 +279,7 @@ export function OfficeCanvas({
           characters: officeState.characters,
         };
 
+        const layout = officeState.getLayout();
         const { offsetX, offsetY } = renderFrame(
           ctx,
           w,
@@ -264,9 +292,15 @@ export function OfficeCanvas({
           panRef.current.y,
           selectionRender,
           editorRender,
-          officeState.getLayout().tileColors,
-          officeState.getLayout().cols,
-          officeState.getLayout().rows,
+          layout.tileColors,
+          layout.cols,
+          layout.rows,
+          layout.carpetTiles,
+          layout.areas,
+          layout.areaTiles,
+          showAreas,
+          activeAreaLabel,
+          officeState.pets,
         );
         offsetRef.current = { x: offsetX, y: offsetY };
 
@@ -280,7 +314,17 @@ export function OfficeCanvas({
       stop();
       observer.disconnect();
     };
-  }, [officeState, resizeCanvas, isEditMode, editorState, _editorTick, zoom, panRef]);
+  }, [
+    officeState,
+    resizeCanvas,
+    isEditMode,
+    editorState,
+    _editorTick,
+    zoom,
+    panRef,
+    showAreas,
+    activeAreaLabel,
+  ]);
 
   // Convert CSS mouse coords to world (sprite pixel) coords
   const screenToWorld = useCallback(
@@ -368,22 +412,30 @@ export function OfficeCanvas({
             }
           }
 
-          // Paint on drag (tile/wall/erase paint tool only, not during furniture drag)
+          // Paint on drag (paint-style tools only, not during furniture drag).
+          // Carpet + Area paint join the drag set so a single click-drag stamps
+          // every tile under the cursor — stroke-based undo lives in
+          // useEditorActions for carpet, per-tile undo for area.
           if (
             editorState.isDragging &&
             (editorState.activeTool === EditTool.TILE_PAINT ||
               editorState.activeTool === EditTool.WALL_PAINT ||
-              editorState.activeTool === EditTool.ERASE) &&
+              editorState.activeTool === EditTool.ERASE ||
+              editorState.activeTool === EditTool.CARPET_PAINT ||
+              editorState.activeTool === EditTool.AREA_PAINT) &&
             !editorState.dragUid
           ) {
             onEditorTileAction(tile.col, tile.row);
           }
-          // Right-click erase drag
+          // Right-click erase drag — also extends over carpets/areas so right-
+          // drag wipes them just like floor/wall.
           if (
             isEraseDraggingRef.current &&
             (editorState.activeTool === EditTool.TILE_PAINT ||
               editorState.activeTool === EditTool.WALL_PAINT ||
-              editorState.activeTool === EditTool.ERASE)
+              editorState.activeTool === EditTool.ERASE ||
+              editorState.activeTool === EditTool.CARPET_PAINT ||
+              editorState.activeTool === EditTool.AREA_PAINT)
           ) {
             const layout = officeState.getLayout();
             if (
@@ -457,27 +509,21 @@ export function OfficeCanvas({
       const pos = screenToWorld(e.clientX, e.clientY);
       if (!pos) return;
       const hitId = officeState.getCharacterAt(pos.worldX, pos.worldY);
+      // Only run pet hit-test if no character was hit (avoids redundant work).
+      const petId = hitId === null ? officeState.getPetAt(pos.worldX, pos.worldY) : null;
       const tile = screenToTile(e.clientX, e.clientY);
       officeState.hoveredTile = tile;
       const canvas = canvasRef.current;
       if (canvas) {
-        let cursor = 'default';
-        if (hitId !== null) {
-          cursor = 'pointer';
-        } else if (officeState.selectedAgentId !== null && tile) {
-          // Check if hovering over a clickable seat (available or own)
-          const seatId = officeState.getSeatAtTile(tile.col, tile.row);
-          if (seatId) {
-            const seat = officeState.seats.get(seatId);
-            if (seat) {
-              const selectedCh = officeState.characters.get(officeState.selectedAgentId);
-              if (!seat.assigned || (selectedCh && selectedCh.seatId === seatId)) {
-                cursor = 'pointer';
-              }
-            }
-          }
-        }
-        canvas.style.cursor = cursor;
+        canvas.style.cursor = computeNormalModeCursor({
+          hitId,
+          petId,
+          selectedAgentId: officeState.selectedAgentId,
+          tile,
+          getSeatAtTile: (col, row) => officeState.getSeatAtTile(col, row),
+          getSeat: (seatId) => officeState.seats.get(seatId),
+          getCharacter: (id) => officeState.characters.get(id),
+        });
       }
       officeState.hoveredAgentId = hitId;
     },
@@ -523,7 +569,9 @@ export function OfficeCanvas({
           tile &&
           (editorState.activeTool === EditTool.TILE_PAINT ||
             editorState.activeTool === EditTool.WALL_PAINT ||
-            editorState.activeTool === EditTool.ERASE)
+            editorState.activeTool === EditTool.ERASE ||
+            editorState.activeTool === EditTool.CARPET_PAINT ||
+            editorState.activeTool === EditTool.AREA_PAINT)
         ) {
           const layout = officeState.getLayout();
           if (tile.col >= 0 && tile.col < layout.cols && tile.row >= 0 && tile.row < layout.rows) {
@@ -620,6 +668,11 @@ export function OfficeCanvas({
       }
       if (e.button === 2) {
         isEraseDraggingRef.current = false;
+        // Close any in-progress carpet / area stroke so the next stroke
+        // starts a fresh undo entry instead of bundling into this one.
+        editorState.carpetStrokeInitialLayout = null;
+        editorState.carpetDragErasing = null;
+        editorState.areaDragErasing = null;
         return;
       }
 
@@ -662,12 +715,22 @@ export function OfficeCanvas({
 
       editorState.isDragging = false;
       editorState.wallDragAdding = null;
+      // Close the current carpet stroke so the next click starts a fresh undo entry.
+      editorState.carpetStrokeInitialLayout = null;
+      editorState.carpetDragErasing = null;
+      editorState.areaDragErasing = null;
     },
     [editorState, isEditMode, officeState, onDragMove, onEditorSelectionChange],
   );
 
   const handleClick = useCallback(
     (e: React.MouseEvent) => {
+      if (didPanRef.current) {
+        // A touch drag just panned — swallow the trailing click so it doesn't
+        // also select/deselect an agent.
+        didPanRef.current = false;
+        return;
+      }
       if (isEditMode) return; // handled by mouseDown/mouseUp
       const pos = screenToWorld(e.clientX, e.clientY);
       if (!pos) return;
@@ -685,6 +748,18 @@ export function OfficeCanvas({
           officeState.cameraFollowId = hitId;
         }
         onClick(hitId); // still focus terminal
+        return;
+      }
+
+      // Pet hit: toggle the heart bubble.
+      const petId = officeState.getPetAt(pos.worldX, pos.worldY);
+      if (petId !== null) {
+        const pet = officeState.pets.find((p) => p.id === petId);
+        if (pet?.bubbleType) {
+          officeState.dismissPetBubble(petId);
+        } else {
+          officeState.showPetBubble(petId);
+        }
         return;
       }
 
@@ -743,12 +818,23 @@ export function OfficeCanvas({
     isEraseDraggingRef.current = false;
     editorState.isDragging = false;
     editorState.wallDragAdding = null;
+    editorState.carpetStrokeInitialLayout = null;
+    editorState.carpetDragErasing = null;
+    editorState.areaDragErasing = null;
     editorState.clearDrag();
     editorState.ghostCol = -1;
     editorState.ghostRow = -1;
     officeState.hoveredAgentId = null;
     officeState.hoveredTile = null;
-  }, [officeState, editorState]);
+
+    // Reset cursor in non-edit mode so pointer doesn't get stuck after hovering a pet.
+    if (!isEditMode) {
+      const canvas = canvasRef.current;
+      if (canvas) {
+        canvas.style.cursor = 'default';
+      }
+    }
+  }, [officeState, editorState, isEditMode]);
 
   const handleContextMenu = useCallback(
     (e: React.MouseEvent) => {
@@ -802,6 +888,91 @@ export function OfficeCanvas({
     return () => canvas.removeEventListener('wheel', handleWheel);
   }, [handleWheel]);
 
+  // Touch pan / pinch-zoom (mouse + pen keep their existing handlers). One
+  // finger pans in view mode (edit mode lets the synthesized click paint/place);
+  // two fingers pinch to step the zoom. Registered once; reads live refs.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const pts = new Map<number, { x: number; y: number }>();
+    let panStart: { px: number; py: number; x: number; y: number } | null = null;
+    let pinchDist = 0;
+
+    const onDown = (e: PointerEvent) => {
+      // Any new press starts a fresh interaction. Reset BEFORE the touch filter:
+      // after a touch pan the browser never synthesizes the click that would
+      // consume the flag, so a mouse/pen press must clear it or its next click
+      // is silently swallowed (hybrid touch+mouse devices).
+      didPanRef.current = false;
+      if (e.pointerType !== 'touch') return;
+      unlockAudio();
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pts.size === 1) {
+        panStart = { px: panRef.current.x, py: panRef.current.y, x: e.clientX, y: e.clientY };
+      } else if (pts.size === 2) {
+        panStart = null;
+        const [a, b] = [...pts.values()];
+        pinchDist = Math.hypot(a.x - b.x, a.y - b.y);
+      }
+    };
+
+    const onMove = (e: PointerEvent) => {
+      if (e.pointerType !== 'touch' || !pts.has(e.pointerId)) return;
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+      if (pts.size >= 2) {
+        e.preventDefault();
+        didPanRef.current = true;
+        const [a, b] = [...pts.values()];
+        const dist = Math.hypot(a.x - b.x, a.y - b.y);
+        if (pinchDist > 0) {
+          const ratio = dist / pinchDist;
+          if (ratio > 1.25 || ratio < 0.8) {
+            const nz = Math.max(
+              ZOOM_MIN,
+              Math.min(ZOOM_MAX, zoomRef.current + (ratio > 1 ? 1 : -1)),
+            );
+            if (nz !== zoomRef.current) {
+              officeState.cameraFollowId = null;
+              onZoomChangeRef.current(nz);
+            }
+            pinchDist = dist;
+          }
+        }
+        return;
+      }
+
+      // Single finger: pan in view mode only (edit mode → synthesized mouse paints).
+      if (isEditModeRef.current || !panStart) return;
+      const dpr = window.devicePixelRatio || 1;
+      const dx = (e.clientX - panStart.x) * dpr;
+      const dy = (e.clientY - panStart.y) * dpr;
+      if (Math.abs(dx) + Math.abs(dy) > 4) {
+        didPanRef.current = true;
+        officeState.cameraFollowId = null;
+      }
+      panRef.current = clampPanRef.current(panStart.px + dx, panStart.py + dy);
+    };
+
+    const onUp = (e: PointerEvent) => {
+      if (e.pointerType !== 'touch') return;
+      pts.delete(e.pointerId);
+      if (pts.size < 2) pinchDist = 0;
+      if (pts.size === 0) panStart = null;
+    };
+
+    canvas.addEventListener('pointerdown', onDown);
+    canvas.addEventListener('pointermove', onMove, { passive: false });
+    canvas.addEventListener('pointerup', onUp);
+    canvas.addEventListener('pointercancel', onUp);
+    return () => {
+      canvas.removeEventListener('pointerdown', onDown);
+      canvas.removeEventListener('pointermove', onMove);
+      canvas.removeEventListener('pointerup', onUp);
+      canvas.removeEventListener('pointercancel', onUp);
+    };
+  }, [officeState, panRef]);
+
   // Prevent default middle-click browser behavior (auto-scroll)
   const handleAuxClick = useCallback((e: React.MouseEvent) => {
     if (e.button === 1) e.preventDefault();
@@ -818,7 +989,7 @@ export function OfficeCanvas({
         onAuxClick={handleAuxClick}
         onMouseLeave={handleMouseLeave}
         onContextMenu={handleContextMenu}
-        className="block"
+        className="block game-canvas"
       />
     </div>
   );

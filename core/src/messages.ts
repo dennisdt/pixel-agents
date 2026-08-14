@@ -24,16 +24,24 @@ export type ServerMessage =
   | SubagentClear
   | SubagentToolPermission
   | AgentTeamInfo
+  | AgentContextUsage
   | AgentTokenUsage
+  | AgentCwd
+  | DirectoryExp
+  | DirectoryExpAll
   | LayoutLoaded
   | FurnitureAssetsLoaded
   | CharacterSpritesLoaded
+  | PetSpritesLoaded
   | FloorTilesLoaded
   | WallTilesLoaded
+  | CarpetTilesLoaded
   | SettingsLoaded
   | ExternalAssetDirectoriesUpdated
+  | AreaMappingsLoaded
   | WorkspaceFolders
-  | AgentDiagnostics;
+  | AgentDiagnostics
+  | RecentProjects;
 
 export type ClientMessage =
   | WebviewReady
@@ -45,6 +53,7 @@ export type ClientMessage =
   | SetSoundEnabled
   | SetLastSeenVersion
   | SetAlwaysShowLabels
+  | SetGhostHeadlessAgents
   | SetHooksEnabled
   | SetHooksInfoShown
   | SetWatchAllSessions
@@ -53,10 +62,14 @@ export type ClientMessage =
   | OpenSessionsFolder
   | AddExternalAssetDirectory
   | RemoveExternalAssetDirectory
-  | RequestDiagnostics;
+  | SaveAreaMappings
+  | SetShowAreas
+  | RequestDiagnostics
+  | RequestRecentProjects;
 
 export interface ProviderCapabilities {
   type: 'providerCapabilities';
+  providerId: string;
   readingTools: string[];
   subagentToolNames: string[];
 }
@@ -66,6 +79,10 @@ export interface AgentCreated {
   id: number;
   folderName?: string;
   isExternal?: boolean;
+  palette?: number;
+  hueShift?: number;
+  cwd?: string;
+  provider?: string;
 }
 
 export interface AgentClosed {
@@ -80,10 +97,12 @@ export interface AgentSelected {
 
 export interface ExistingAgents {
   type: 'existingAgents';
+  cwds?: Record<string, string>;
   agents: number[];
   agentMeta: Record<string, AgentSeatMeta>;
   folderNames: Record<string, string>;
   externalAgents: Record<string, boolean>;
+  providers?: Record<string, string>;
 }
 
 export interface AgentSeatMeta {
@@ -96,6 +115,7 @@ export interface AgentStatus {
   type: 'agentStatus';
   id: number;
   status: AgentActivityStatus;
+  awaitingInput?: boolean;
 }
 
 export type AgentActivityStatus = 'active' | 'waiting';
@@ -108,6 +128,7 @@ export interface AgentToolStart {
   toolName?: string;
   permissionActive?: boolean;
   runInBackground?: boolean;
+  isTeammateSpawn?: boolean;
 }
 
 export interface AgentToolDone {
@@ -168,11 +189,35 @@ export interface AgentTeamInfo {
   teamUsesTmux?: boolean;
 }
 
+export interface AgentContextUsage {
+  type: 'agentContextUsage';
+  id: number;
+  contextTokens: number;
+  maxContextTokens: number;
+}
+
 export interface AgentTokenUsage {
   type: 'agentTokenUsage';
   id: number;
   inputTokens: number;
   outputTokens: number;
+}
+
+export interface AgentCwd {
+  type: 'agentCwd';
+  id: number;
+  cwd: string;
+}
+
+export interface DirectoryExp {
+  type: 'directoryExp';
+  directory: string;
+  totalExp: number;
+}
+
+export interface DirectoryExpAll {
+  type: 'directoryExpAll';
+  stats: Record<string, number>;
 }
 
 export interface LayoutLoaded {
@@ -221,6 +266,20 @@ export interface CharacterSpriteSet {
   right: string[][][];
 }
 
+export interface PetSpritesLoaded {
+  type: 'petSpritesLoaded';
+  pets: PetSpriteFrameSet[];
+  petNames: string[];
+}
+
+export interface PetSpriteFrameSet {
+  walkDown: string[][][];
+  idleDown: string[][][];
+  walkUp: string[][][];
+  idleUp: string[][][];
+  walkRight: string[][][];
+}
+
 export interface FloorTilesLoaded {
   type: 'floorTilesLoaded';
   sprites: string[][][];
@@ -231,6 +290,11 @@ export interface WallTilesLoaded {
   sets: string[][][][];
 }
 
+export interface CarpetTilesLoaded {
+  type: 'carpetTilesLoaded';
+  sets: string[][][][];
+}
+
 export interface SettingsLoaded {
   type: 'settingsLoaded';
   soundEnabled: boolean;
@@ -238,14 +302,21 @@ export interface SettingsLoaded {
   extensionVersion: string;
   watchAllSessions: boolean;
   alwaysShowLabels: boolean;
+  ghostHeadlessAgents: boolean;
   hooksEnabled: boolean;
   hooksInfoShown: boolean;
   externalAssetDirectories: string[];
+  showAreas: boolean;
 }
 
 export interface ExternalAssetDirectoriesUpdated {
   type: 'externalAssetDirectoriesUpdated';
   dirs: string[];
+}
+
+export interface AreaMappingsLoaded {
+  type: 'areaMappingsLoaded';
+  mappings: Record<string, string[]>;
 }
 
 export interface WorkspaceFolders {
@@ -261,6 +332,18 @@ export interface WorkspaceFolder {
 export interface AgentDiagnostics {
   type: 'agentDiagnostics';
   agents: Record<string, any>[];
+}
+
+export interface RecentProjects {
+  type: 'recentProjects';
+  projects: RecentProject[];
+}
+
+export interface RecentProject {
+  hash: string;
+  displayName: string;
+  fullPath?: string | null;
+  lastUsed: number;
 }
 
 export interface WebviewReady {
@@ -314,6 +397,11 @@ export interface SetAlwaysShowLabels {
   enabled: boolean;
 }
 
+export interface SetGhostHeadlessAgents {
+  type: 'setGhostHeadlessAgents';
+  enabled: boolean;
+}
+
 export interface SetHooksEnabled {
   type: 'setHooksEnabled';
   enabled: boolean;
@@ -342,6 +430,7 @@ export interface OpenSessionsFolder {
 
 export interface AddExternalAssetDirectory {
   type: 'addExternalAssetDirectory';
+  path?: string;
 }
 
 export interface RemoveExternalAssetDirectory {
@@ -349,6 +438,20 @@ export interface RemoveExternalAssetDirectory {
   path: string;
 }
 
+export interface SaveAreaMappings {
+  type: 'saveAreaMappings';
+  mappings: Record<string, string[]>;
+}
+
+export interface SetShowAreas {
+  type: 'setShowAreas';
+  enabled: boolean;
+}
+
 export interface RequestDiagnostics {
   type: 'requestDiagnostics';
+}
+
+export interface RequestRecentProjects {
+  type: 'requestRecentProjects';
 }

@@ -153,11 +153,13 @@ describe('HookEventHandler', () => {
       (m) => m.type === 'agentStatus' && m.status === 'waiting',
     );
     expect(msg).toBeTruthy();
+    // idle_prompt = waiting on the user -> awaitingInput true ("Waiting for input")
+    expect(msg?.awaitingInput).toBe(true);
   });
 
   // ── Stop ────────────────────────────────────────────────────
 
-  it('Stop marks agent waiting', () => {
+  it('Stop marks agent waiting without awaitingInput (Done)', () => {
     const agent = createTestAgent({ id: 1 });
     agents.set(1, agent);
     handler.registerAgent('sess-1', 1);
@@ -172,6 +174,8 @@ describe('HookEventHandler', () => {
       (m) => m.type === 'agentStatus' && m.status === 'waiting',
     );
     expect(waitMsg).toBeTruthy();
+    // Stop = finished its turn -> awaitingInput falsy ("Done")
+    expect(waitMsg?.awaitingInput).toBeFalsy();
   });
 
   it('Stop clears foreground tools but preserves background agents', () => {
@@ -572,10 +576,68 @@ describe('HookEventHandler', () => {
       'ext-sess',
       '/projects/test/ext-sess.jsonl',
       '/projects/test',
+      'claude',
+      undefined,
+      undefined, // folderHint — only set for cwd-less sessions
+      undefined, // expBucket — only set by hermes
     );
     // Stop was re-processed after agent creation
     const agent = agents.get(2);
     expect(agent?.isWaiting).toBe(true);
+  });
+
+  it('SessionStart with persona_key threads it through to onExternalSessionDetected', () => {
+    const onExternalSessionDetected = vi.fn();
+    handler.setLifecycleCallbacks({ onExternalSessionDetected });
+
+    handler.handleEvent('claude', {
+      hook_event_name: 'SessionStart',
+      session_id: 'persona-sess',
+      source: 'startup',
+      transcript_path: '/projects/test/persona-sess.jsonl',
+      cwd: '/projects/test',
+      persona_key: 'cli:/projects/test',
+    });
+
+    handler.handleEvent('claude', {
+      hook_event_name: 'Stop',
+      session_id: 'persona-sess',
+    });
+
+    expect(onExternalSessionDetected).toHaveBeenCalledWith(
+      'persona-sess',
+      '/projects/test/persona-sess.jsonl',
+      '/projects/test',
+      'claude',
+      'cli:/projects/test',
+      undefined, // folderHint — only set for cwd-less sessions
+      undefined, // expBucket — only set by hermes
+    );
+  });
+
+  it('file-based provider: SessionStart with cwd but no transcript_path is NOT adopted', () => {
+    // Claude (usesTranscriptFile) always writes a transcript. A SessionStart
+    // carrying only a cwd (transient/headless invocation, e.g. launched from /)
+    // must not be stored as pending — confirming it would mint a transcript-less
+    // "hooks-only" zombie agent that no scanner can ever reap.
+    const onExternalSessionDetected = vi.fn();
+    handler.setLifecycleCallbacks({ onExternalSessionDetected });
+
+    handler.handleEvent('claude', {
+      hook_event_name: 'SessionStart',
+      session_id: 'no-transcript-sess',
+      source: 'startup',
+      cwd: '/',
+    });
+
+    // A later confirmation event must find no pending session → no agent created.
+    handler.handleEvent('claude', {
+      hook_event_name: 'Stop',
+      session_id: 'no-transcript-sess',
+    });
+
+    expect(onExternalSessionDetected).not.toHaveBeenCalled();
+    expect(agents.size).toBe(0);
   });
 
   // ── Resume ──────────────────────────────────────────────────
@@ -682,11 +744,23 @@ describe('HookEventHandler', () => {
 
   // ── Provider-agnostic (optional transcript_path) ────────────
 
-  it('SessionStart stores pending with cwd only (no transcript_path)', () => {
+  it('hooks-only provider: SessionStart stores pending with cwd only (no transcript_path)', () => {
+    // A provider with usesTranscriptFile=false has no transcript at all, so a
+    // cwd-only SessionStart is the only signal it ever gets — it must still be
+    // adopted. (Claude, a file-based provider, is covered by the negative test
+    // above.)
+    const hooksOnlyProvider = { ...claudeProvider, usesTranscriptFile: false };
+    const hooksOnlyHandler = new HookEventHandler(
+      agents,
+      waitingTimers,
+      permissionTimers,
+      hooksOnlyProvider,
+      new SessionRouter(),
+    );
     const onExternalSessionDetected = vi.fn();
-    handler.setLifecycleCallbacks({ onExternalSessionDetected });
+    hooksOnlyHandler.setLifecycleCallbacks({ onExternalSessionDetected });
 
-    handler.handleEvent('claude', {
+    hooksOnlyHandler.handleEvent('claude', {
       hook_event_name: 'SessionStart',
       session_id: 'no-transcript-sess',
       source: 'startup',
@@ -704,11 +778,11 @@ describe('HookEventHandler', () => {
         projectDir: '/projects/test',
       } as Partial<AgentState>);
       agents.set(2, agent);
-      handler.registerAgent(sessionId, 2);
+      hooksOnlyHandler.registerAgent(sessionId, 2);
     });
 
     // Confirmation event creates agent
-    handler.handleEvent('claude', {
+    hooksOnlyHandler.handleEvent('claude', {
       hook_event_name: 'Stop',
       session_id: 'no-transcript-sess',
     });
@@ -717,7 +791,158 @@ describe('HookEventHandler', () => {
       'no-transcript-sess',
       undefined,
       '/projects/test',
+      'claude',
+      undefined,
+      undefined, // folderHint — only set for cwd-less sessions
+      undefined, // expBucket — only set by hermes
     );
+  });
+
+  it('hooks-only provider: SessionStart with NO identifying fields is NOT adopted (forgery guard)', () => {
+    // Wave 3 FIX 6: the relaxed hooks-only gate rests on "real by construction"
+    // (the provider's poller announced the session), but the HTTP endpoint only
+    // checks the bearer token. A forged SessionStart+confirmation with zero
+    // identifying fields would mint a nameless, permanently un-reapable agent
+    // (hooksOnly agents skip the stale check via the jsonlFile-'' guard). The
+    // content layer of the trust boundary: at least one of persona_key,
+    // folder_hint, exp_bucket, or cwd must be a non-empty string.
+    const hooksOnlyProvider = { ...claudeProvider, usesTranscriptFile: false };
+    const hooksOnlyHandler = new HookEventHandler(
+      agents,
+      waitingTimers,
+      permissionTimers,
+      hooksOnlyProvider,
+      new SessionRouter(),
+    );
+    const onExternalSessionDetected = vi.fn();
+    hooksOnlyHandler.setLifecycleCallbacks({ onExternalSessionDetected });
+
+    hooksOnlyHandler.handleEvent('claude', {
+      hook_event_name: 'SessionStart',
+      session_id: 'forged-sess',
+      source: 'startup',
+    });
+    hooksOnlyHandler.handleEvent('claude', {
+      hook_event_name: 'Stop',
+      session_id: 'forged-sess',
+    });
+
+    expect(onExternalSessionDetected).not.toHaveBeenCalled();
+    expect(agents.size).toBe(0);
+  });
+
+  it('hooks-only provider: SessionStart with persona_key only IS adopted', () => {
+    // HermesPoller always sends persona_key + exp_bucket, so any single
+    // identifying field must suffice — real adoption is unaffected by the
+    // forgery guard.
+    const hooksOnlyProvider = { ...claudeProvider, usesTranscriptFile: false };
+    const hooksOnlyHandler = new HookEventHandler(
+      agents,
+      waitingTimers,
+      permissionTimers,
+      hooksOnlyProvider,
+      new SessionRouter(),
+    );
+    const onExternalSessionDetected = vi.fn();
+    hooksOnlyHandler.setLifecycleCallbacks({ onExternalSessionDetected });
+
+    hooksOnlyHandler.handleEvent('claude', {
+      hook_event_name: 'SessionStart',
+      session_id: 'persona-only-sess',
+      source: 'startup',
+      persona_key: 'webui:',
+    });
+    hooksOnlyHandler.handleEvent('claude', {
+      hook_event_name: 'Stop',
+      session_id: 'persona-only-sess',
+    });
+
+    expect(onExternalSessionDetected).toHaveBeenCalledWith(
+      'persona-only-sess',
+      undefined,
+      '',
+      'claude',
+      'webui:',
+      undefined, // folderHint
+      undefined, // expBucket
+    );
+  });
+
+  // ── Wave 4 FIX 8: poller-vouched immediate adoption ──────────
+  // Idle poller-announced sessions never produce a follow-up event, so the
+  // pending->confirmation filter (built for transient Claude Extension
+  // sessions) parked them as "pending" forever. `confirmed: true` on the raw
+  // envelope is the poller vouching for liveness -> adopt immediately.
+
+  function makeHooksOnlyHandler(): {
+    h: HookEventHandler;
+    onExternalSessionDetected: ReturnType<typeof vi.fn>;
+  } {
+    const hooksOnlyProvider = { ...claudeProvider, usesTranscriptFile: false };
+    const h = new HookEventHandler(
+      agents,
+      waitingTimers,
+      permissionTimers,
+      hooksOnlyProvider,
+      new SessionRouter(),
+    );
+    const onExternalSessionDetected = vi.fn();
+    h.setLifecycleCallbacks({ onExternalSessionDetected });
+    return { h, onExternalSessionDetected };
+  }
+
+  it('hooks-only provider: SessionStart with confirmed:true adopts immediately, no follow-up needed', () => {
+    const { h, onExternalSessionDetected } = makeHooksOnlyHandler();
+
+    h.handleEvent('claude', {
+      hook_event_name: 'SessionStart',
+      session_id: 'vouched-sess',
+      source: 'external',
+      persona_key: 'webui:',
+      confirmed: true,
+    });
+
+    // Adopted from the SessionStart alone -- no confirmation event sent.
+    expect(onExternalSessionDetected).toHaveBeenCalledWith(
+      'vouched-sess',
+      undefined,
+      '',
+      'claude',
+      'webui:',
+      undefined, // folderHint
+      undefined, // expBucket
+    );
+  });
+
+  it('hooks-only provider: SessionStart without confirmed still goes pending (existing behavior)', () => {
+    const { h, onExternalSessionDetected } = makeHooksOnlyHandler();
+
+    h.handleEvent('claude', {
+      hook_event_name: 'SessionStart',
+      session_id: 'unvouched-sess',
+      source: 'external',
+      persona_key: 'webui:',
+    });
+    expect(onExternalSessionDetected).not.toHaveBeenCalled(); // pending
+
+    h.handleEvent('claude', { hook_event_name: 'Stop', session_id: 'unvouched-sess' });
+    expect(onExternalSessionDetected).toHaveBeenCalledTimes(1); // confirmed the usual way
+  });
+
+  it('hooks-only provider: forged empty-identity SessionStart with confirmed:true is still rejected', () => {
+    // confirmed:true must not bypass the wave-3 identifying-fields guard.
+    const { h, onExternalSessionDetected } = makeHooksOnlyHandler();
+
+    h.handleEvent('claude', {
+      hook_event_name: 'SessionStart',
+      session_id: 'forged-vouched-sess',
+      source: 'startup',
+      confirmed: true,
+    });
+    h.handleEvent('claude', { hook_event_name: 'Stop', session_id: 'forged-vouched-sess' });
+
+    expect(onExternalSessionDetected).not.toHaveBeenCalled();
+    expect(agents.size).toBe(0);
   });
 
   it('SessionStart(source=resume) uses cwd for matching when no transcript_path', () => {

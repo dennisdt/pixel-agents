@@ -3,30 +3,44 @@ import { useEffect, useState } from 'react';
 import { Button } from '../../components/ui/Button.js';
 import {
   CHARACTER_SITTING_OFFSET_PX,
-  FUEL_COLOR_CRITICAL,
-  FUEL_COLOR_DANGER,
-  FUEL_COLOR_OK,
-  FUEL_COLOR_WARN,
-  FUEL_GAUGE_BG,
-  FUEL_GAUGE_HEIGHT_PX,
-  FUEL_GAUGE_WIDTH_PX,
-  MAX_CONTEXT_TOKENS,
+  CONTEXT_CRITICAL_THRESHOLD,
+  CONTEXT_DANGER_THRESHOLD,
+  CONTEXT_GAUGE_BG,
+  CONTEXT_GAUGE_COLOR_CRITICAL,
+  CONTEXT_GAUGE_COLOR_DANGER,
+  CONTEXT_GAUGE_COLOR_OK,
+  CONTEXT_GAUGE_COLOR_WARN,
+  CONTEXT_GAUGE_HEIGHT_PX,
+  CONTEXT_GAUGE_WIDTH_PX,
+  CONTEXT_WARN_THRESHOLD,
+  EXP_BAR_BG_COLOR,
+  EXP_BAR_BORDER_COLOR,
+  EXP_BAR_FILL_COLOR,
+  EXP_BAR_HEIGHT_PX,
+  PROVIDER_BADGE_COLORS,
+  PROVIDER_BADGE_FALLBACK_COLOR,
+  PROVIDER_BADGE_LABELS,
   TEAM_LEAD_COLOR,
   TEAM_ROLE_COLOR,
-  TOKEN_CRITICAL_THRESHOLD,
-  TOKEN_DANGER_THRESHOLD,
-  TOKEN_WARN_THRESHOLD,
   TOOL_OVERLAY_VERTICAL_OFFSET,
 } from '../../constants.js';
 import type { SubagentCharacter } from '../../hooks/useExtensionMessages.js';
 import type { OfficeState } from '../engine/officeState.js';
+import { calculateLevel, getTitleForLevel } from '../toolUtils.js';
 import type { ToolActivity } from '../types.js';
 import { CharacterState, TILE_SIZE } from '../types.js';
+
+// Both turn-end states show the green checkmark bubble. A finished turn (Stop)
+// shows ONLY the checkmark (the label falls through to its normal idle text);
+// going idle waiting on the user (Notification(idle_prompt)) additionally
+// surfaces this label. Driven by Character.waitingAwaitingInput.
+const WAITING_INPUT_ACTIVITY_TEXT = 'Waiting for input';
 
 interface ToolOverlayProps {
   officeState: OfficeState;
   agents: number[];
   agentTools: Record<number, ToolActivity[]>;
+  subagentTools: Record<number, Record<string, ToolActivity[]>>;
   subagentCharacters: SubagentCharacter[];
   containerRef: React.RefObject<HTMLDivElement | null>;
   zoom: number;
@@ -40,16 +54,22 @@ function getActivityText(
   agentId: number,
   agentTools: Record<number, ToolActivity[]>,
   isActive: boolean,
+  bubbleType: 'permission' | 'waiting' | null,
+  waitingAwaitingInput: boolean,
 ): string {
+  if (bubbleType === 'permission') return 'Needs approval';
+  // Only the idle case ("Waiting for input") gets a dedicated label. A finished
+  // turn (Stop, waitingAwaitingInput=false) falls through so the checkmark alone
+  // signals "done", same as the original behavior.
+  if (bubbleType === 'waiting' && waitingAwaitingInput) return WAITING_INPUT_ACTIVITY_TEXT;
+
   const tools = agentTools[agentId];
   if (tools && tools.length > 0) {
-    // Find the latest non-done tool
     const activeTool = [...tools].reverse().find((t) => !t.done);
     if (activeTool) {
       if (activeTool.permissionWait) return 'Needs approval';
       return activeTool.status;
     }
-    // All tools done but agent still active (mid-turn) — keep showing last tool status
     if (isActive) {
       const lastTool = tools[tools.length - 1];
       if (lastTool) return lastTool.status;
@@ -60,16 +80,17 @@ function getActivityText(
 }
 
 function getFuelColor(ratio: number): string {
-  if (ratio >= TOKEN_CRITICAL_THRESHOLD) return FUEL_COLOR_CRITICAL;
-  if (ratio >= TOKEN_DANGER_THRESHOLD) return FUEL_COLOR_DANGER;
-  if (ratio >= TOKEN_WARN_THRESHOLD) return FUEL_COLOR_WARN;
-  return FUEL_COLOR_OK;
+  if (ratio >= CONTEXT_CRITICAL_THRESHOLD) return CONTEXT_GAUGE_COLOR_CRITICAL;
+  if (ratio >= CONTEXT_DANGER_THRESHOLD) return CONTEXT_GAUGE_COLOR_DANGER;
+  if (ratio >= CONTEXT_WARN_THRESHOLD) return CONTEXT_GAUGE_COLOR_WARN;
+  return CONTEXT_GAUGE_COLOR_OK;
 }
 
 export function ToolOverlay({
   officeState,
   agents,
   agentTools,
+  subagentTools,
   subagentCharacters,
   containerRef,
   zoom,
@@ -103,7 +124,6 @@ export function ToolOverlay({
   const selectedId = officeState.selectedAgentId;
   const hoveredId = officeState.hoveredAgentId;
 
-  // All character IDs
   const allIds = [...agents, ...subagentCharacters.map((s) => s.id)];
 
   return (
@@ -116,48 +136,94 @@ export function ToolOverlay({
         const isHovered = hoveredId === id;
         const isSub = ch.isSubagent;
 
-        // Only show for hovered or selected agents (unless always-show is on)
         if (!alwaysShowOverlay && !isSelected && !isHovered) return null;
 
-        // Position above character
         const sittingOffset = ch.state === CharacterState.TYPE ? CHARACTER_SITTING_OFFSET_PX : 0;
         const screenX = (deviceOffsetX + ch.x * zoom) / dpr;
         const screenY =
           (deviceOffsetY + (ch.y + sittingOffset - TOOL_OVERLAY_VERTICAL_OFFSET) * zoom) / dpr;
 
+        // A "Done" agent (finished turn: waiting bubble without awaitingInput)
+        // shows ONLY its floating green checkmark bubble, never the label panel
+        // (the panel would cover the bubble). Render an empty positioned marker
+        // so overlay counts stay stable and hover/select can still bring the
+        // panel back. When always-show is off, the early return above already
+        // keeps the panel hidden for idle agents.
+        const isDone = ch.bubbleType === 'waiting' && !ch.waitingAwaitingInput;
+        if (isDone && !isSelected && !isHovered) {
+          return (
+            <div
+              key={id}
+              className="absolute"
+              style={{ left: screenX, top: screenY, pointerEvents: 'none' }}
+              data-testid="agent-overlay"
+              data-agent-id={id}
+            />
+          );
+        }
+
         // Get activity text
+        const hasWaitingBubble = ch.bubbleType === 'waiting';
         const subHasPermission = isSub && ch.bubbleType === 'permission';
         let activityText: string;
-        if (isSub) {
+        if (hasWaitingBubble && ch.waitingAwaitingInput) {
+          // Idle, waiting on the user -> dedicated label. A finished turn (Stop)
+          // shows only the checkmark and falls through to the normal idle text.
+          activityText = WAITING_INPUT_ACTIVITY_TEXT;
+        } else if (isSub) {
           if (subHasPermission) {
             activityText = 'Needs approval';
           } else {
+            // Hover shows the subtask title; SELECTING the sub reveals its live
+            // tool activity (watched sub-agents stream it via subagentToolStart).
             const sub = subagentCharacters.find((s) => s.id === id);
-            activityText = sub ? sub.label : 'Subtask';
+            const rows = sub ? subagentTools[sub.parentAgentId]?.[sub.parentToolId] : undefined;
+            const activeRow =
+              isSelected && rows ? [...rows].reverse().find((t) => !t.done) : undefined;
+            activityText = activeRow?.status ?? (sub?.label || 'Subtask');
           }
         } else {
-          activityText = getActivityText(id, agentTools, ch.isActive);
+          activityText = getActivityText(
+            id,
+            agentTools,
+            ch.isActive,
+            ch.bubbleType,
+            ch.waitingAwaitingInput ?? false,
+          );
         }
 
-        // Determine dot color
         const tools = agentTools[id];
         const hasPermission = subHasPermission || tools?.some((t) => t.permissionWait && !t.done);
         const hasActiveTools = tools?.some((t) => !t.done);
         const isActive = ch.isActive;
+        const hasWaiting = ch.bubbleType === 'waiting';
 
         let dotColor: string | null = null;
-        if (hasPermission) {
+        if (hasPermission || hasWaiting) {
           dotColor = 'var(--color-status-permission)';
         } else if (isActive && hasActiveTools) {
           dotColor = 'var(--color-status-active)';
         }
 
         // Team info
-        const isTeamAgent = !!ch.teamName;
         const teamRoleLabel = ch.isTeamLead ? 'LEAD' : ch.agentName || null;
-        const totalTokens = ch.inputTokens + ch.outputTokens;
-        const tokenRatio = totalTokens / MAX_CONTEXT_TOKENS;
-        const hasExtraLines = !!(ch.folderName || teamRoleLabel);
+        // Claude is the default/majority — badge only non-default providers (restrained).
+        const providerBadge = ch.provider && ch.provider !== 'claude' ? ch.provider : null;
+
+        // Sub-agents inherit the parent's leveling implicitly (we don't render theirs).
+        // Show the bar even at 0 EXP so leads always have a Lv/title + progress chip.
+        const exp = ch.directoryExp ?? 0;
+        const showLevel = !isSub;
+        const { level, progress } = calculateLevel(exp);
+        const titleMeta = showLevel ? getTitleForLevel(level) : null;
+
+        const hasExtraLines = !!(ch.folderName || teamRoleLabel || titleMeta || providerBadge);
+
+        // Context gauge. Every agent gets one — lead, teammate, adopted,
+        // headless — as soon as it has taken a turn. Sub-agents never do: they
+        // have no session of their own, so contextTokens stays 0.
+        const contextRatio = ch.contextTokens / ch.maxContextTokens;
+        const showContextGauge = !isSub && ch.contextTokens > 0;
 
         return (
           <div
@@ -170,15 +236,46 @@ export function ToolOverlay({
               opacity: alwaysShowOverlay && !isSelected && !isHovered ? (isSub ? 0.5 : 0.75) : 1,
               zIndex: isSelected ? 42 : 41,
             }}
+            data-testid="agent-overlay"
+            data-agent-id={id}
           >
             <div className="flex items-center border-border px-8 pt-2 pb-4 gap-5 pixel-panel whitespace-nowrap max-w-2xs">
               {dotColor && (
                 <span
-                  className={`w-6 h-6 rounded-full shrink-0 ${isActive && !hasPermission ? 'pixel-pulse' : ''}`}
+                  className={`w-6 h-6 rounded-full shrink-0 ${isActive && !hasPermission && !hasWaiting ? 'pixel-pulse' : ''}`}
                   style={{ background: dotColor }}
                 />
               )}
               <div className="flex flex-col gap-0 overflow-hidden">
+                {titleMeta && (
+                  <>
+                    <span
+                      className="overflow-hidden text-ellipsis block leading-none"
+                      style={{ fontSize: '18px', color: titleMeta.color, fontWeight: 'bold' }}
+                    >
+                      Lv.{level} · {titleMeta.title}
+                    </span>
+                    <div
+                      style={{
+                        width: '100%',
+                        height: EXP_BAR_HEIGHT_PX,
+                        background: EXP_BAR_BG_COLOR,
+                        border: `1px solid ${EXP_BAR_BORDER_COLOR}`,
+                        marginTop: 2,
+                        marginBottom: 2,
+                      }}
+                      title={`${Math.round(progress * 100)}% to Lv.${level + 1} (${exp.toLocaleString()} EXP)`}
+                    >
+                      <div
+                        style={{
+                          width: `${Math.min(progress * 100, 100)}%`,
+                          height: '100%',
+                          background: EXP_BAR_FILL_COLOR,
+                        }}
+                      />
+                    </div>
+                  </>
+                )}
                 {teamRoleLabel && (
                   <span
                     className="overflow-hidden text-ellipsis block leading-none"
@@ -205,6 +302,17 @@ export function ToolOverlay({
                     {ch.folderName}
                   </span>
                 )}
+                {providerBadge && (
+                  <span
+                    className="text-2xs leading-none overflow-hidden text-ellipsis block"
+                    style={{
+                      color: PROVIDER_BADGE_COLORS[providerBadge] ?? PROVIDER_BADGE_FALLBACK_COLOR,
+                      fontWeight: 'bold',
+                    }}
+                  >
+                    {PROVIDER_BADGE_LABELS[providerBadge] ?? providerBadge.toUpperCase()}
+                  </span>
+                )}
               </div>
               {isSelected && !isSub && (
                 <Button
@@ -221,21 +329,23 @@ export function ToolOverlay({
                 </Button>
               )}
             </div>
-            {isTeamAgent && totalTokens > 0 && (
+            {showContextGauge && (
               <div
                 style={{
-                  width: FUEL_GAUGE_WIDTH_PX,
-                  height: FUEL_GAUGE_HEIGHT_PX,
-                  background: FUEL_GAUGE_BG,
+                  width: CONTEXT_GAUGE_WIDTH_PX,
+                  height: CONTEXT_GAUGE_HEIGHT_PX,
+                  background: CONTEXT_GAUGE_BG,
                   marginTop: 2,
                 }}
-                title={`${Math.round(tokenRatio * 100)}% context used (${(totalTokens / 1000).toFixed(0)}k tokens)`}
+                title={`${Math.round(contextRatio * 100)}% context used (${(ch.contextTokens / 1000).toFixed(0)}k of ${(ch.maxContextTokens / 1000).toFixed(0)}k tokens)`}
+                data-testid="context-gauge"
+                data-context-pct={Math.round(contextRatio * 100)}
               >
                 <div
                   style={{
-                    width: `${Math.min(tokenRatio * 100, 100)}%`,
+                    width: `${Math.min(contextRatio * 100, 100)}%`,
                     height: '100%',
-                    background: getFuelColor(tokenRatio),
+                    background: getFuelColor(contextRatio),
                   }}
                 />
               </div>

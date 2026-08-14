@@ -8,9 +8,13 @@ export interface AdapterSettings {
   soundEnabled: boolean;
   lastSeenVersion: string;
   alwaysShowLabels: boolean;
+  ghostHeadlessAgents: boolean;
   watchAllSessions: boolean;
   hooksEnabled: boolean;
   hooksInfoShown: boolean;
+  showAreas: boolean;
+  areaMappings: Record<string, string[]>;
+  hermesEnabled: boolean;
 }
 
 /** All keys in AdapterSettings. Used by adapters to map `pixel-agents.foo` → `foo`. */
@@ -18,9 +22,13 @@ export const ADAPTER_SETTING_KEYS = [
   'soundEnabled',
   'lastSeenVersion',
   'alwaysShowLabels',
+  'ghostHeadlessAgents',
   'watchAllSessions',
   'hooksEnabled',
   'hooksInfoShown',
+  'showAreas',
+  'areaMappings',
+  'hermesEnabled',
 ] as const;
 
 export type AdapterSettingKey = (typeof ADAPTER_SETTING_KEYS)[number];
@@ -38,13 +46,41 @@ const DEFAULT_ADAPTER_SETTINGS: AdapterSettings = {
   soundEnabled: true,
   lastSeenVersion: '',
   alwaysShowLabels: false,
+  ghostHeadlessAgents: false,
   watchAllSessions: false,
   hooksEnabled: true,
   hooksInfoShown: false,
+  showAreas: false,
+  areaMappings: {},
+  hermesEnabled: false,
 };
 
 function getConfigFilePath(): string {
   return path.join(os.homedir(), LAYOUT_FILE_DIR, CONFIG_FILE_NAME);
+}
+
+/**
+ * Coerce a loose object into `Record<string, string[]>`, dropping any entries
+ * whose value is not an array of strings. Returns `{}` if the input isn't an
+ * object. Used to defensively load folder→area mappings from config.json,
+ * which may have been hand-edited or written by an older build.
+ */
+export function parseAreaMappings(raw: unknown): Record<string, string[]> {
+  if (!raw || typeof raw !== 'object') {
+    return {};
+  }
+  const out: Record<string, string[]> = {};
+  for (const [folder, labels] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof folder !== 'string') {
+      continue;
+    }
+    if (!Array.isArray(labels)) {
+      continue;
+    }
+    const filtered = labels.filter((l): l is string => typeof l === 'string');
+    out[folder] = filtered;
+  }
+  return out;
 }
 
 /** Coerce a loose object into a valid AdapterSettings with defaults for missing/wrong-typed fields. */
@@ -63,6 +99,10 @@ function parseAdapterSettings(raw: unknown): AdapterSettings {
       typeof obj.alwaysShowLabels === 'boolean'
         ? obj.alwaysShowLabels
         : DEFAULT_ADAPTER_SETTINGS.alwaysShowLabels,
+    ghostHeadlessAgents:
+      typeof obj.ghostHeadlessAgents === 'boolean'
+        ? obj.ghostHeadlessAgents
+        : DEFAULT_ADAPTER_SETTINGS.ghostHeadlessAgents,
     watchAllSessions:
       typeof obj.watchAllSessions === 'boolean'
         ? obj.watchAllSessions
@@ -75,6 +115,13 @@ function parseAdapterSettings(raw: unknown): AdapterSettings {
       typeof obj.hooksInfoShown === 'boolean'
         ? obj.hooksInfoShown
         : DEFAULT_ADAPTER_SETTINGS.hooksInfoShown,
+    showAreas:
+      typeof obj.showAreas === 'boolean' ? obj.showAreas : DEFAULT_ADAPTER_SETTINGS.showAreas,
+    areaMappings: parseAreaMappings(obj.areaMappings),
+    hermesEnabled:
+      typeof obj.hermesEnabled === 'boolean'
+        ? obj.hermesEnabled
+        : DEFAULT_ADAPTER_SETTINGS.hermesEnabled,
   };
 }
 
