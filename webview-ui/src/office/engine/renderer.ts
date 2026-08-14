@@ -58,6 +58,7 @@ import {
   BUBBLE_WAITING_SPRITE,
   getCharacterSprites,
 } from '../sprites/spriteData.js';
+import { getAuraForLevel, getAuraIntensity } from '../toolUtils.js';
 import type {
   AreaDefinition,
   CarpetTile,
@@ -70,6 +71,7 @@ import type {
 } from '../types.js';
 import { CharacterState, TILE_SIZE, TileType } from '../types.js';
 import { getWallInstances, hasWallSprites, wallColorToHex } from '../wallTiles.js';
+import { renderAura } from './auraEffect.js';
 import { getCharacterSprite } from './characters.js';
 import { renderMatrixEffect } from './matrixEffect.js';
 import { getPetSpriteData } from './petEntity.js';
@@ -442,6 +444,23 @@ export function renderScene(
           c.restore();
         },
       });
+    }
+
+    // Same eligibility gate as the auraTimer advance in characters.ts.
+    if (!ch.isSubagent) {
+      const auraId = getAuraForLevel(ch.level ?? 0);
+      if (auraId) {
+        const auraIntensity = getAuraIntensity(ch.level ?? 0);
+        const auraTimer = ch.auraTimer ?? 0;
+        const spriteW = cached.width;
+        const spriteH = cached.height;
+        drawables.push({
+          zY: charZY - OUTLINE_Z_SORT_OFFSET * 2,
+          draw: (c) => {
+            renderAura(c, auraId, drawX, drawY, spriteW, spriteH, zoom, auraTimer, auraIntensity);
+          },
+        });
+      }
     }
 
     drawables.push({

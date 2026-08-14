@@ -7,6 +7,7 @@ import Fastify from 'fastify';
 
 import type { AgentRuntime } from './agentRuntime.js';
 import type { AgentStateStore } from './agentStateStore.js';
+import { AUTH_COOKIE, isAuthed, loginPageHtml, safeEqual } from './auth.js';
 import type {
   AssetCache,
   ReloadAssetsSideEffect,
@@ -24,8 +25,12 @@ export interface HttpServerOptions {
   host?: string;
   /** Port to listen on. Default: 0 (auto-assign) */
   port?: number;
-  /** Bearer auth token for hook and WebSocket endpoints */
+  /** Bearer auth token for hook and (embedded) WebSocket endpoints */
   token: string;
+  /** When true (standalone bound to a non-loopback host), gate SPA/ws/api with accessToken. */
+  requireAuth?: boolean;
+  /** Shared-secret access token for the browser/Tailscale (cookie or Bearer). */
+  accessToken?: string;
   /** AgentStateStore for WebSocket broadcast piping */
   store: AgentStateStore;
   /** Shared agent lifecycle core (for toggle side effects + standalone restore). Optional in embedded mode. */
@@ -65,6 +70,12 @@ export async function createHttpServer(options: HttpServerOptions): Promise<Http
   await app.register(fastifyCors, { origin: true });
   await app.register(fastifyWebsocket);
 
+  // Access auth gate (standalone bound to a non-loopback host). Runs as an
+  // onRequest hook so it also covers the /ws upgrade and static SPA assets.
+  if (!options.embedded && options.requireAuth && options.accessToken) {
+    registerAccessAuth(app, options.accessToken);
+  }
+
   // Static SPA serving (standalone mode only)
   if (!options.embedded && options.staticDir) {
     await app.register(fastifyStatic, {
@@ -90,6 +101,56 @@ export async function createHttpServer(options: HttpServerOptions): Promise<Http
   const port = typeof address === 'object' ? (address?.port ?? 0) : 0;
 
   return { app, port };
+}
+
+// ── Access auth (standalone, non-loopback) ─────────────────────
+
+function registerAccessAuth(app: FastifyInstance, accessToken: string): void {
+  // /login: validate ?token= and set the auth cookie, else show the form.
+  app.get<{ Querystring: { token?: string } }>('/login', async (request, reply) => {
+    const provided = request.query.token;
+    if (provided && safeEqual(provided, accessToken)) {
+      reply.header(
+        'set-cookie',
+        `${AUTH_COOKIE}=${encodeURIComponent(accessToken)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=31536000`,
+      );
+      reply.redirect('/');
+      return;
+    }
+    reply.code(provided ? 401 : 200);
+    reply.type('text/html');
+    return loginPageHtml(Boolean(provided));
+  });
+
+  // Gate everything except the health check, the login page, the hook endpoint,
+  // and the PWA branding assets. Hook requests carry their own bearer token (the
+  // hook token from server.json, validated by the route's bearerAuth) rather
+  // than the browser access token, so the access guard must not reject them
+  // first. The manifest + icons must stay public: the OS fetches them during
+  // "Add to Home Screen" and on PWA launch with no session cookie, so gating
+  // them makes the installed app fall back to a generated letter icon.
+  app.addHook('onRequest', async (request, reply) => {
+    const url = request.url.split('?')[0];
+    if (
+      url === '/api/health' ||
+      url === '/login' ||
+      url.startsWith(`${HOOK_API_PREFIX}/`) ||
+      url === '/manifest.webmanifest' ||
+      url === '/favicon.ico' ||
+      url === '/apple-touch-icon.png' ||
+      url === '/apple-touch-icon-precomposed.png' ||
+      url.startsWith('/icons/')
+    ) {
+      return;
+    }
+    if (isAuthed(request.headers, accessToken)) return;
+    const accept = request.headers.accept ?? '';
+    if (request.method === 'GET' && accept.includes('text/html')) {
+      reply.redirect('/login');
+    } else {
+      reply.code(401).send('unauthorized');
+    }
+  });
 }
 
 // ── Health ──────────────────────────────────────────────────────

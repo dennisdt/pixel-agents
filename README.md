@@ -170,6 +170,23 @@ Press **F5** in VS Code to launch the Extension Development Host. To run the sta
 node dist/cli.js
 ```
 
+### Standalone web app
+
+Pixel Agents also runs as a standalone web server — no VS Code needed:
+
+```bash
+npm run web        # http://127.0.0.1:3100
+```
+
+To reach it from your phone (e.g. over Tailscale) with a password screen:
+
+```bash
+PIXEL_AGENTS_TOKEN=your-secret npm run web:host   # binds 0.0.0.0
+```
+
+See [docs/remote-access.md](docs/remote-access.md) for the full setup —
+Tailscale, the auth flow, keeping the server running, and redeploying.
+
 Common checks:
 
 ```bash

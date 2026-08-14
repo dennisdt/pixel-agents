@@ -239,6 +239,19 @@ export interface Character {
   leadAgentId?: number;
   /** True when lead spawns teammates via tmux (run_in_background Agent calls) */
   teamUsesTmux?: boolean;
+  /** Cumulative input tokens consumed */
+  inputTokens: number;
+  /** Cumulative output tokens consumed */
+  outputTokens: number;
+
+  // -- Leveling (derived from per-directory output token totals) --
+  /** Current level (1..50+), derived from directoryExp via calculateLevel() */
+  level?: number;
+  /** Cumulative directory EXP this character's project has earned. Drives
+   *  both level and the progress bar in the overlay. */
+  directoryExp?: number;
+  /** Animation timer (seconds, monotonically increases) for aura effects */
+  auraTimer?: number;
 
   // -- Context gauge --
   /** Tokens in the agent's context as of its newest turn; 0 until reported.

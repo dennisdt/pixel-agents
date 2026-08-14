@@ -93,6 +93,23 @@
   body,
   #root {
     @apply m-0 w-full h-full overflow-hidden font-pixel text-base text-text;
+    /* Stop iOS rubber-band / pull-to-refresh from eating canvas drags. */
+    overscroll-behavior: none;
+  }
+
+  body {
+    /* Dragging to pan shouldn't select page text on touch. */
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  /* The game canvas owns all touch gestures (drag-pan / pinch-zoom); without
+     this the browser scrolls/zooms the page instead of the world. Scoped to
+     .game-canvas only — preview canvases (e.g. the editor palette thumbnails)
+     live inside scrollable carousels that still need native touch scrolling. */
+  .game-canvas {
+    touch-action: none;
+    -webkit-touch-callout: none;
   }
 
   * {

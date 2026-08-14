@@ -126,6 +126,11 @@ export async function loadFurnitureAssets(workspaceRoot: string): Promise<Loaded
               canPlaceOnSurfaces: manifest.canPlaceOnSurfaces,
               backgroundTiles: manifest.backgroundTiles,
               groupId: manifest.id,
+              // Single-asset manifests may still declare an orientation/state
+              // (e.g. a side-facing chair). Carry them through so chair seat
+              // facing + z-sorting and electronics state read correctly.
+              ...(manifest.orientation ? { orientation: manifest.orientation } : {}),
+              ...(manifest.state ? { state: manifest.state } : {}),
             },
           ];
         } else {

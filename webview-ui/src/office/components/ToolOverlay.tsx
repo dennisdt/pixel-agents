@@ -13,12 +13,17 @@ import {
   CONTEXT_GAUGE_HEIGHT_PX,
   CONTEXT_GAUGE_WIDTH_PX,
   CONTEXT_WARN_THRESHOLD,
+  EXP_BAR_BG_COLOR,
+  EXP_BAR_BORDER_COLOR,
+  EXP_BAR_FILL_COLOR,
+  EXP_BAR_HEIGHT_PX,
   TEAM_LEAD_COLOR,
   TEAM_ROLE_COLOR,
   TOOL_OVERLAY_VERTICAL_OFFSET,
 } from '../../constants.js';
 import type { SubagentCharacter } from '../../hooks/useExtensionMessages.js';
 import type { OfficeState } from '../engine/officeState.js';
+import { calculateLevel, getTitleForLevel } from '../toolUtils.js';
 import type { ToolActivity } from '../types.js';
 import { CharacterState, TILE_SIZE } from '../types.js';
 
@@ -57,13 +62,11 @@ function getActivityText(
 
   const tools = agentTools[agentId];
   if (tools && tools.length > 0) {
-    // Find the latest non-done tool
     const activeTool = [...tools].reverse().find((t) => !t.done);
     if (activeTool) {
       if (activeTool.permissionWait) return 'Needs approval';
       return activeTool.status;
     }
-    // All tools done but agent still active (mid-turn) — keep showing last tool status
     if (isActive) {
       const lastTool = tools[tools.length - 1];
       if (lastTool) return lastTool.status;
@@ -118,7 +121,6 @@ export function ToolOverlay({
   const selectedId = officeState.selectedAgentId;
   const hoveredId = officeState.hoveredAgentId;
 
-  // All character IDs
   const allIds = [...agents, ...subagentCharacters.map((s) => s.id)];
 
   return (
@@ -131,10 +133,8 @@ export function ToolOverlay({
         const isHovered = hoveredId === id;
         const isSub = ch.isSubagent;
 
-        // Only show for hovered or selected agents (unless always-show is on)
         if (!alwaysShowOverlay && !isSelected && !isHovered) return null;
 
-        // Position above character
         const sittingOffset = ch.state === CharacterState.TYPE ? CHARACTER_SITTING_OFFSET_PX : 0;
         const screenX = (deviceOffsetX + ch.x * zoom) / dpr;
         const screenY =
@@ -189,7 +189,6 @@ export function ToolOverlay({
           );
         }
 
-        // Determine dot color
         const tools = agentTools[id];
         const hasPermission = subHasPermission || tools?.some((t) => t.permissionWait && !t.done);
         const hasActiveTools = tools?.some((t) => !t.done);
@@ -205,7 +204,14 @@ export function ToolOverlay({
 
         // Team info
         const teamRoleLabel = ch.isTeamLead ? 'LEAD' : ch.agentName || null;
-        const hasExtraLines = !!(ch.folderName || teamRoleLabel);
+        // Sub-agents inherit the parent's leveling implicitly (we don't render theirs).
+        // Show the bar even at 0 EXP so leads always have a Lv/title + progress chip.
+        const exp = ch.directoryExp ?? 0;
+        const showLevel = !isSub;
+        const { level, progress } = calculateLevel(exp);
+        const titleMeta = showLevel ? getTitleForLevel(level) : null;
+
+        const hasExtraLines = !!(ch.folderName || teamRoleLabel || titleMeta);
 
         // Context gauge. Every agent gets one — lead, teammate, adopted,
         // headless — as soon as it has taken a turn. Sub-agents never do: they
@@ -235,6 +241,35 @@ export function ToolOverlay({
                 />
               )}
               <div className="flex flex-col gap-0 overflow-hidden">
+                {titleMeta && (
+                  <>
+                    <span
+                      className="overflow-hidden text-ellipsis block leading-none"
+                      style={{ fontSize: '18px', color: titleMeta.color, fontWeight: 'bold' }}
+                    >
+                      Lv.{level} · {titleMeta.title}
+                    </span>
+                    <div
+                      style={{
+                        width: '100%',
+                        height: EXP_BAR_HEIGHT_PX,
+                        background: EXP_BAR_BG_COLOR,
+                        border: `1px solid ${EXP_BAR_BORDER_COLOR}`,
+                        marginTop: 2,
+                        marginBottom: 2,
+                      }}
+                      title={`${Math.round(progress * 100)}% to Lv.${level + 1} (${exp.toLocaleString()} EXP)`}
+                    >
+                      <div
+                        style={{
+                          width: `${Math.min(progress * 100, 100)}%`,
+                          height: '100%',
+                          background: EXP_BAR_FILL_COLOR,
+                        }}
+                      />
+                    </div>
+                  </>
+                )}
                 {teamRoleLabel && (
                   <span
                     className="overflow-hidden text-ellipsis block leading-none"

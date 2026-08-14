@@ -18,9 +18,11 @@ import {
   loadAllFurniture,
   loadAllPets,
 } from './assetReload.js';
+import { isLoopbackHost, resolveAccessAuth } from './auth.js';
 import type { AssetCache, ReloadAssetsSideEffect } from './clientMessageHandler.js';
 import { readConfig } from './configPersistence.js';
 import { MAX_PORT, MIN_PORT } from './constants.js';
+import { flushDirectoryStats, loadDirectoryStats } from './directoryStats.js';
 import { FileStateAdapter } from './fileStateAdapter.js';
 import { claudeProvider, copyHookScript } from './providers/index.js';
 import { PixelAgentsServer } from './server.js';
@@ -84,8 +86,13 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  // Access auth: none for loopback; shared-secret token for non-loopback (Tailscale/LAN).
+  const auth = resolveAccessAuth(args.host, process.env.PIXEL_AGENTS_TOKEN);
+
   // dist/ contains both the CLI bundle and the assets/ + webview/ directories
   const distRoot = __dirname;
+  // copyHookScript() resolves the script as `<root>/dist/hooks/...`, so it needs
+  // the project root (the parent of dist/), not dist/ itself.
   const packageRoot = path.dirname(distRoot);
   const staticDir = path.join(distRoot, 'webview');
 
@@ -104,6 +111,9 @@ async function main(): Promise<void> {
   console.log(
     `[Pixel Agents] Assets loaded: ${charCount} characters, ${petCount} pets, ${furnitureCount} furniture items`,
   );
+
+  // ── Directory-scoped EXP (leveling): load persisted totals before scanning ──
+  loadDirectoryStats();
 
   // ── Store + adapter (shared settings + standalone-scoped agents/seats) ──
   const store = new AgentStateStore();
@@ -189,6 +199,8 @@ async function main(): Promise<void> {
       port: args.port,
       staticDir,
       assetCache,
+      requireAuth: auth.requireAuth,
+      accessToken: auth.token || undefined,
       onSetHooksEnabled,
       onReloadAssets,
     });
@@ -224,11 +236,34 @@ async function main(): Promise<void> {
       runtime.startStaleCheck();
     }
 
+    // Process-liveness scan: adopt every running `claude` session (even idle
+    // ones with stale transcripts) when watchAllSessions is on. Independent of
+    // the launch project dir; self-gates on the setting.
+    runtime.startProcessScan();
+
     console.log(`\n  Pixel Agents server running at http://${args.host}:${config.port}\n`);
+
+    // ── Access auth banner ──
+    if (auth.requireAuth) {
+      const loginPage = `http://${args.host}:${config.port}/login`;
+      console.log('  🔑 Access token required (bound to a non-loopback host).');
+      if (auth.generated) {
+        // Random token: the operator needs to see it once (it's not logged elsewhere).
+        console.log(`     One-time login URL:\n     ${loginPage}?token=${auth.token}\n`);
+        console.log('     (Token auto-generated. Set PIXEL_AGENTS_TOKEN to pin a stable one.)\n');
+      } else {
+        // Operator-provided token: don't write the secret to the log.
+        console.log(`     Sign in at ${loginPage} with your configured token.\n`);
+      }
+    } else if (!isLoopbackHost(args.host)) {
+      // Shouldn't happen (resolveAccessAuth requires auth for non-loopback), but warn loudly.
+      console.warn('  [!!] WARNING: bound to a non-loopback host with NO access token set.\n');
+    }
 
     // ── Graceful shutdown ──
     function shutdown(): void {
       console.log('\nShutting down...');
+      flushDirectoryStats();
       runtime.dispose();
       server.stop();
       process.exit(0);

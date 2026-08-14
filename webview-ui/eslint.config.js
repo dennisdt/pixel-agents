@@ -42,7 +42,15 @@ export default defineConfig([
     },
   },
   {
-    files: ['src/constants.ts', 'src/fonts/**', 'src/office/sprites/**'],
+    // Color-data modules: centralized style constants and canvas rendering
+    // palettes (auraEffect uses per-frame hsl() rotations that can't be tokens).
+    files: [
+      'src/constants.ts',
+      'src/fonts/**',
+      'src/office/sprites/**',
+      'src/components/modalStyles.ts',
+      'src/office/engine/auraEffect.ts',
+    ],
     rules: {
       'pixel-agents/no-inline-colors': 'off',
       'pixel-agents/pixel-shadow': 'off',

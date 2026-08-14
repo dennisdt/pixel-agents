@@ -47,6 +47,12 @@ export const GLOBAL_SCAN_ACTIVE_MIN_SIZE = 3_072; // 3KB
 /** Only adopt global JSONL files modified within this window */
 export const GLOBAL_SCAN_ACTIVE_MAX_AGE_MS = 600_000; // 10 minutes
 
+// ── Process Liveness Scanning (watchAllSessions) ────────────
+/** How often to enumerate running `claude` processes (adopts idle-but-alive sessions). */
+export const PROCESS_SCAN_INTERVAL_MS = 5_000;
+/** Consecutive process scans with no live process (and a stale file) before removing an agent. */
+export const PROCESS_SCAN_REMOVE_STRIKES = 2;
+
 // ── Display Truncation + Pixel Agents Server paths ──────────
 // Centralized in core/src/constants.ts; re-exported here for back-compat.
 export {

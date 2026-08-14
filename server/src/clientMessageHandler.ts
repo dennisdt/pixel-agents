@@ -1,3 +1,6 @@
+import * as crypto from 'crypto';
+import * as path from 'path';
+
 import { resendAgentActivity } from './agentActivityResend.js';
 import { buildAgentDiagnostics } from './agentDiagnostics.js';
 import type { AgentRuntime } from './agentRuntime.js';
@@ -5,6 +8,8 @@ import type { AgentStateStore } from './agentStateStore.js';
 import type { LoadedAssets, LoadedCharacterSprites, LoadedPetSprites } from './assetLoader.js';
 import { readConfig, writeConfig } from './configPersistence.js';
 import { HUE_SHIFT_MAX_DEG, PALETTE_COUNT } from './constants.js';
+import { getDirectoryStatsSnapshot } from './directoryStats.js';
+import { launchClaudeInTmux, listRecentProjects } from './launcher.js';
 import { readLayoutFromFile, writeLayoutToFile } from './layoutPersistence.js';
 import { claudeProvider } from './providers/index.js';
 
@@ -89,6 +94,25 @@ export function handleClientMessage(
       // Point-to-point reply to the requesting socket (NOT a broadcast).
       send({ type: 'agentDiagnostics', agents: buildAgentDiagnostics(store) });
       break;
+
+    case 'requestRecentProjects':
+      send({ type: 'recentProjects', projects: listRecentProjects() });
+      break;
+
+    case 'launchAgent': {
+      if (!runtime) break;
+      const folderPath = (msg.folderPath as string) || process.cwd();
+      const bypass = msg.bypassPermissions === true;
+      const projectDir = claudeProvider.getSessionDirs?.(folderPath)?.[0];
+      if (!projectDir) break;
+      const sessionId = crypto.randomUUID();
+      const jsonlFile = path.join(projectDir, `${sessionId}.jsonl`);
+      // Spawn claude on the host, then adopt the (about-to-exist) session file.
+      launchClaudeInTmux(folderPath, sessionId, bypass)
+        .then(() => runtime.adoptLaunchedSession(sessionId, jsonlFile, folderPath))
+        .catch((err) => console.error('[Pixel Agents] launchAgent failed:', err));
+      break;
+    }
 
     case 'saveLayout':
       if (msg.layout) {
@@ -299,15 +323,20 @@ function handleWebviewReady(send: WsSend, ctx: ClientMessageContext): void {
     runtime.hooksEnabled.current = hooksEnabled;
   }
 
-  // 5. Restore persisted external agents (standalone only; VS Code handles its own restore)
+  // 5. Directory-scoped EXP snapshot (leveling). Per-agent cwd ships with
+  //    existingAgents below so a (re)connecting client can resolve levels.
+  send({ type: 'directoryExpAll', stats: getDirectoryStatsSnapshot() });
+
+  // 6. Restore persisted external agents (standalone only; VS Code handles its own restore)
   runtime?.restoreExternalAgents();
 
-  // 6. Existing agents (either just restored, or from VS Code adapter if present)
+  // 7. Existing agents (either just restored, or from VS Code adapter if present)
   const agentIds: number[] = [];
   const folderNames: Record<number, string> = {};
   const externalAgents: Record<number, boolean> = {};
   const persistedSeats = adapter?.loadSeats() ?? {};
   const agentMeta: Record<number, { palette?: number; hueShift?: number; seatId?: string }> = {};
+  const cwds: Record<number, string> = {};
   for (const [id, agent] of store) {
     agentIds.push(id);
     if (agent.folderName) {
@@ -322,6 +351,9 @@ function handleWebviewReady(send: WsSend, ctx: ClientMessageContext): void {
       hueShift: agent.hueShift,
       seatId: persisted?.seatId,
     };
+    if (agent.cwd) {
+      cwds[id] = agent.cwd;
+    }
   }
   send({
     type: 'existingAgents',
@@ -329,6 +361,7 @@ function handleWebviewReady(send: WsSend, ctx: ClientMessageContext): void {
     agentMeta,
     folderNames,
     externalAgents,
+    cwds,
   });
 
   // 7. Layout last (see step 3): flushes the webview's buffered existingAgents

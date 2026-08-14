@@ -44,6 +44,7 @@ import {
 } from './constants.js';
 import { seedContextUsage } from './contextUsage.js';
 import type { DismissalTracker } from './dismissalTracker.js';
+import { folderNameFromCwd, readCwdFromJsonl } from './jsonl.js';
 import { assignPaletteIfNeeded } from './paletteAssigner.js';
 import { pathsMatch } from './pathKey.js';
 import type { SubagentWatch } from './subagentWatch.js';
@@ -527,6 +528,8 @@ function adoptTerminalForFile(
     linesProcessed: 0,
     seenUnknownRecordTypes: new Set(),
     hookDelivered: false,
+    inputTokens: 0,
+    outputTokens: 0,
     contextTokens: 0,
     maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
   };
@@ -741,6 +744,8 @@ export function scanForTeammateFiles(
       lastDataAt: Date.now(),
       linesProcessed: 0,
       seenUnknownRecordTypes: new Set(),
+      inputTokens: 0,
+      outputTokens: 0,
       contextTokens: 0,
       maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
       // Agent Teams fields
@@ -898,6 +903,8 @@ export function scanForBackgroundAgentFiles(
       lastDataAt: Date.now(),
       linesProcessed: 0,
       seenUnknownRecordTypes: new Set(),
+      inputTokens: 0,
+      outputTokens: 0,
       contextTokens: 0,
       maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
       // Teammate-like linkage, but NO teamName: config polling must not touch these.
@@ -1088,7 +1095,10 @@ export function adoptExternalSessionFromHook(
       folderNameResolver?.({ cwd, projectDir }) ??
       folderNameFromProjectDir(path.basename(projectDir));
 
-    adoptExternalSession(
+    // The hook delivered the authoritative cwd — pass it down so the display
+    // name is right even when the transcript is still empty (SessionStart fires
+    // before the first JSONL record lands).
+    const adoptedAgent = adoptExternalSession(
       transcriptPath,
       projectDir,
       nextAgentIdRef,
@@ -1099,23 +1109,21 @@ export function adoptExternalSessionFromHook(
       permissionTimers,
       persistAgents,
       folderName,
+      cwd,
     );
 
-    const adoptedAgent = [...agents.values()].find((a) => pathsMatch(a.jsonlFile, transcriptPath));
-    if (adoptedAgent && debug) {
+    if (debug) {
       console.log(
         `[Pixel Agents] Hook: Agent ${adoptedAgent.id} - detected external session ${path.basename(transcriptPath)}${adoptedAgent.folderName ? ` (${adoptedAgent.folderName})` : ''}`,
       );
     }
-    if (adoptedAgent) {
-      adoptedAgent.sessionId = sessionId;
-      adoptedAgent.hookDelivered = true;
-      onAgentCreated?.(adoptedAgent);
-    }
+    adoptedAgent.sessionId = sessionId;
+    adoptedAgent.hookDelivered = true;
+    onAgentCreated?.(adoptedAgent);
   } else {
     // Hooks-only provider (OpenCode, Copilot): no transcript file, all state from hooks
     const id = nextAgentIdRef.current++;
-    const folderName = folderNameResolver?.({ cwd }) ?? (cwd ? path.basename(cwd) : undefined);
+    const folderName = folderNameResolver?.({ cwd }) ?? folderNameFromCwd(cwd);
     const agent: AgentState = {
       id,
       sessionId,
@@ -1140,6 +1148,8 @@ export function adoptExternalSessionFromHook(
       linesProcessed: 0,
       seenUnknownRecordTypes: new Set(),
       folderName,
+      inputTokens: 0,
+      outputTokens: 0,
       contextTokens: 0,
       maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
     };
@@ -1167,7 +1177,8 @@ function adoptExternalSession(
 
   persistAgents: () => void,
   folderName?: string,
-): void {
+  knownCwd?: string,
+): AgentState {
   const id = nextAgentIdRef.current++;
   // Decide whether to replay the existing file content or skip to its end.
   //
@@ -1198,6 +1209,11 @@ function adoptExternalSession(
   } catch {
     /* start from beginning if stat fails */
   }
+  // Prefer the real working directory (hook-provided, else from the transcript)
+  // for the display name; the caller's `folderName` (derived from the lossy
+  // project-dir hash) is only a fallback. Setting `cwd` here also spares
+  // resolveAndCreditAgent a second read.
+  const cwd = knownCwd || readCwdFromJsonl(jsonlFile);
   const agent: AgentState = {
     id,
     sessionId: path.basename(jsonlFile, '.jsonl'),
@@ -1220,7 +1236,10 @@ function adoptExternalSession(
     lastDataAt: Date.now(),
     linesProcessed: 0,
     seenUnknownRecordTypes: new Set(),
-    folderName,
+    cwd,
+    folderName: folderNameFromCwd(cwd, folderName),
+    inputTokens: 0,
+    outputTokens: 0,
     contextTokens: 0,
     maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
   };
@@ -1242,6 +1261,7 @@ function adoptExternalSession(
     permissionTimers,
   );
   readNewLines(id, agents, waitingTimers, permissionTimers);
+  return agent;
 }
 
 /**
@@ -1537,10 +1557,7 @@ function scanGlobalProjectDirs(
         folderNameResolver?.({ projectDir: dirPath }) ??
         folderNameFromProjectDir(path.basename(dirPath));
       knownJsonlFiles.add(file);
-      console.log(
-        `[Pixel Agents] Watcher: detected global session ${path.basename(file)} (${folderName})`,
-      );
-      adoptExternalSession(
+      const adopted = adoptExternalSession(
         file,
         dirPath,
         nextAgentIdRef,
@@ -1551,6 +1568,11 @@ function scanGlobalProjectDirs(
         permissionTimers,
         persistAgents,
         folderName,
+      );
+      console.log(
+        `[Pixel Agents] Watcher: detected global session ${path.basename(file)}${
+          adopted.folderName ? ` (${adopted.folderName})` : ''
+        }`,
       );
     }
   }

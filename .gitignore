@@ -39,6 +39,7 @@ allure-report/
 agent-orchestrator.yaml
 .worktrees
 
+
 # Local notes (not for commit)
 /notes/
 /docs/e2e-*.md

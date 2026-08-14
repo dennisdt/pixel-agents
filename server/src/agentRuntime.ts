@@ -14,7 +14,14 @@ import * as path from 'path';
 
 import type { HookProvider } from '../../core/src/provider.js';
 import type { AgentStateStore } from './agentStateStore.js';
-import { DEFAULT_MAX_CONTEXT_TOKENS } from './constants.js';
+import { listLiveClaudeSessions, type LiveClaudeSession } from './claudeProcessScan.js';
+import {
+  DEFAULT_MAX_CONTEXT_TOKENS,
+  EXTERNAL_ACTIVE_THRESHOLD_MS,
+  PROCESS_SCAN_INTERVAL_MS,
+  PROCESS_SCAN_REMOVE_STRIKES,
+} from './constants.js';
+import { creditHistoricalSession } from './directoryStats.js';
 import { DismissalTracker } from './dismissalTracker.js';
 import {
   adoptExternalSessionFromHook,
@@ -36,6 +43,7 @@ import {
 } from './fileWatcher.js';
 import type { HookEvent } from './hookEventHandler.js';
 import { HookEventHandler } from './hookEventHandler.js';
+import { folderNameFromCwd, readCwdFromJsonl } from './jsonl.js';
 import { assignPaletteIfNeeded } from './paletteAssigner.js';
 import { PathSet, pathsMatch } from './pathKey.js';
 import { SessionRouter } from './sessionRouter.js';
@@ -73,6 +81,9 @@ export class AgentRuntime {
   readonly activeAgentId = { current: null as number | null };
   private externalScanTimer: ReturnType<typeof setInterval> | null = null;
   private staleCheckTimer: ReturnType<typeof setInterval> | null = null;
+  private processScanTimer: ReturnType<typeof setInterval> | null = null;
+  /** Per-file count of consecutive process scans with no live process + stale file. */
+  private readonly liveSessionMisses = new Map<string, number>();
 
   // Configuration refs (mutable, shared with scanners)
   readonly watchAllSessions = { current: false };
@@ -211,7 +222,7 @@ export class AgentRuntime {
           this.waitingTimers,
           this.permissionTimers,
           () => this.store.persist(),
-          (agent) => this.registerAgent(agent.sessionId, agent.id),
+          (agent) => this.handleAgentCreated(agent),
         );
       },
       onSessionClear: (agentId, newSessionId, newTranscriptPath) => {
@@ -256,7 +267,8 @@ export class AgentRuntime {
           () => this.store.persist(),
           // Don't register inline teammates: they share the lead's sessionId
           // and registering them would overwrite the lead in the session router.
-          undefined,
+          // Credit their EXP though — teammates emit output tokens of their own.
+          (agent) => this.resolveAndCreditAgent(agent),
         );
       },
       onTeammateRemoved: (teammateAgentId) => {
@@ -300,6 +312,28 @@ export class AgentRuntime {
   /** Unregister an agent from the hook event handler. */
   unregisterAgent(sessionId: string): void {
     this.hookEventHandler.unregisterAgent(sessionId);
+  }
+
+  /** Called when an agent is created or restored: register it for hook routing,
+   *  then resolve its cwd and credit its historical EXP (once per session). All
+   *  creation paths funnel through here. */
+  private handleAgentCreated(agent: AgentState): void {
+    this.registerAgent(agent.sessionId, agent.id);
+    this.resolveAndCreditAgent(agent);
+  }
+
+  /** Resolve the agent's working directory (from its JSONL) and credit/broadcast
+   *  its directory-scoped EXP. Historical tokens are summed once per session. */
+  private resolveAndCreditAgent(agent: AgentState): void {
+    if (!agent.cwd) {
+      agent.cwd = readCwdFromJsonl(agent.jsonlFile);
+    }
+    if (!agent.cwd) return;
+    // Sum the whole file only when seeded at EOF; offset-0 agents (teammates)
+    // are fully credited by the live JSONL pump, so summing would double-count.
+    const totalExp = creditHistoricalSession(agent.jsonlFile, agent.cwd, agent.fileOffset > 0);
+    this.store.broadcast({ type: 'agentCwd', id: agent.id, cwd: agent.cwd });
+    this.store.broadcast({ type: 'directoryExp', directory: agent.cwd, totalExp });
   }
 
   // ── Agent removal (shared cleanup) ──
@@ -397,6 +431,28 @@ export class AgentRuntime {
     }
   }
 
+  // ── Launch-from-web ──
+
+  /** Adopt a session launched by the web UI (claude spawned into tmux). The
+   *  JSONL appears once claude starts; reuses the hook-adoption path to create
+   *  the agent, watch the file, and credit EXP. */
+  adoptLaunchedSession(sessionId: string, jsonlFile: string, cwd: string): void {
+    adoptExternalSessionFromHook(
+      sessionId,
+      jsonlFile,
+      cwd,
+      this.knownJsonlFiles,
+      this.store.nextAgentId,
+      this.store,
+      this.fileWatchers,
+      this.pollingTimers,
+      this.waitingTimers,
+      this.permissionTimers,
+      () => this.store.persist(),
+      (agent) => this.handleAgentCreated(agent),
+    );
+  }
+
   // ── Scanning ──
 
   /** Start project-level scanning for a directory. */
@@ -413,7 +469,7 @@ export class AgentRuntime {
       this.waitingTimers,
       this.permissionTimers,
       () => this.store.persist(),
-      onAgentCreated ?? ((agent) => this.registerAgent(agent.sessionId, agent.id)),
+      onAgentCreated ?? ((agent) => this.handleAgentCreated(agent)),
       this.hooksEnabled,
     );
   }
@@ -447,6 +503,101 @@ export class AgentRuntime {
       this.knownJsonlFiles,
       this.hooksEnabled,
     );
+  }
+
+  /**
+   * Start process-liveness scanning (gated by watchAllSessions): adopt every
+   * running `claude` session regardless of transcript mtime — so alive-but-idle
+   * sessions in other terminals/tmux show up — and drop external agents whose
+   * process has exited and whose transcript has gone stale.
+   *
+   * The mtime-based scanners can't see an idle session (no recent writes); this
+   * fills that gap by detecting the live process instead.
+   */
+  startProcessScan(): void {
+    if (this.processScanTimer) return;
+
+    const tick = (): void => {
+      if (!this.watchAllSessions.current) return;
+
+      let live: LiveClaudeSession[];
+      try {
+        live = listLiveClaudeSessions();
+      } catch {
+        return;
+      }
+      const liveFiles = new Set(live.map((s) => s.jsonlFile));
+
+      // Adopt any live session not already tracked. adoptExternalSessionFromHook
+      // dedupes already-tracked + dismissed files and seeds the offset at EOF,
+      // so re-running it every tick for known sessions is a cheap no-op.
+      for (const s of live) {
+        adoptExternalSessionFromHook(
+          s.sessionId,
+          s.jsonlFile,
+          s.cwd,
+          this.knownJsonlFiles,
+          this.store.nextAgentId,
+          this.store,
+          this.fileWatchers,
+          this.pollingTimers,
+          this.waitingTimers,
+          this.permissionTimers,
+          () => this.store.persist(),
+          (agent) => this.handleAgentCreated(agent),
+        );
+      }
+
+      // Remove external agents whose `claude` process is gone AND whose
+      // transcript is stale. The stale guard means an actively-writing session
+      // is never removed even if a single ps/lsof pass misses it; the strike
+      // counter absorbs transient misses.
+      const toRemove: number[] = [];
+      const externalFiles = new Set<string>();
+      for (const [id, agent] of this.store) {
+        // Hooks-only providers (no transcript file) are managed entirely by
+        // hook events — skip them; they're never in liveFiles and statSync('')
+        // would always read as stale.
+        if (!agent.isExternal || !agent.jsonlFile) continue;
+        externalFiles.add(agent.jsonlFile);
+        if (liveFiles.has(agent.jsonlFile)) {
+          this.liveSessionMisses.delete(agent.jsonlFile);
+          continue;
+        }
+        let stale = true;
+        try {
+          stale = Date.now() - fs.statSync(agent.jsonlFile).mtimeMs > EXTERNAL_ACTIVE_THRESHOLD_MS;
+        } catch {
+          stale = true; // transcript gone → removable
+        }
+        if (!stale) continue;
+        const misses = (this.liveSessionMisses.get(agent.jsonlFile) ?? 0) + 1;
+        if (misses < PROCESS_SCAN_REMOVE_STRIKES) {
+          this.liveSessionMisses.set(agent.jsonlFile, misses);
+          continue;
+        }
+        toRemove.push(id);
+      }
+      for (const id of toRemove) {
+        const agent = this.store.get(id);
+        if (agent) {
+          // Mirror startStaleExternalAgentCheck: forget the file so a future
+          // session can be re-adopted, and clear its strike entry.
+          this.knownJsonlFiles.delete(agent.jsonlFile);
+          this.liveSessionMisses.delete(agent.jsonlFile);
+          this.unregisterAgent(agent.sessionId);
+        }
+        this.removeAgent(id);
+      }
+      // Drop strike entries for files no longer held by any external agent
+      // (removed via X-close / SessionEnd / reassign) so the Map can't leak.
+      for (const file of this.liveSessionMisses.keys()) {
+        if (!externalFiles.has(file)) this.liveSessionMisses.delete(file);
+      }
+    };
+
+    tick();
+    this.processScanTimer = setInterval(tick, PROCESS_SCAN_INTERVAL_MS);
   }
 
   // ── Restore persisted external agents (standalone) ──
@@ -483,6 +634,10 @@ export class AgentRuntime {
         continue;
       }
 
+      // Re-derive the display name from the real cwd: persisted state may carry
+      // an old name from the lossy project-dir hash. resolveAndCreditAgent (called
+      // below) reuses this cwd instead of re-reading the file.
+      const cwd = readCwdFromJsonl(p.jsonlFile);
       const agent: AgentState = {
         id: p.id,
         sessionId: p.sessionId || path.basename(p.jsonlFile, '.jsonl'),
@@ -506,8 +661,11 @@ export class AgentRuntime {
         lastDataAt: 0,
         linesProcessed: 0,
         seenUnknownRecordTypes: new Set(),
-        folderName: p.folderName,
+        cwd,
+        folderName: folderNameFromCwd(cwd, p.folderName),
         hookDelivered: false,
+        inputTokens: 0,
+        outputTokens: 0,
         contextTokens: 0,
         maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
         teamName: p.teamName,
@@ -539,7 +697,7 @@ export class AgentRuntime {
         /* ignore stat errors on restore */
       }
 
-      this.registerAgent(agent.sessionId, agent.id);
+      this.handleAgentCreated(agent);
 
       if (p.id > maxId) maxId = p.id;
       console.log(
@@ -573,6 +731,11 @@ export class AgentRuntime {
       clearInterval(this.staleCheckTimer);
       this.staleCheckTimer = null;
     }
+    if (this.processScanTimer) {
+      clearInterval(this.processScanTimer);
+      this.processScanTimer = null;
+    }
+    this.liveSessionMisses.clear();
 
     for (const id of [...this.store.keys()]) {
       this.removeAgent(id);

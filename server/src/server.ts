@@ -69,6 +69,8 @@ export class PixelAgentsServer {
     assetCache?: AssetCache;
     onSetHooksEnabled?: SetHooksEnabledSideEffect;
     onReloadAssets?: ReloadAssetsSideEffect;
+    requireAuth?: boolean;
+    accessToken?: string;
   }): Promise<ServerConfig> {
     const embedded = options?.embedded ?? true;
     const wantsSpa = !embedded;
@@ -103,6 +105,8 @@ export class PixelAgentsServer {
       runtime: options?.runtime,
       staticDir: options?.staticDir,
       assetCache: options?.assetCache,
+      requireAuth: options?.requireAuth,
+      accessToken: options?.accessToken,
       onHookEvent: (providerId, event) => this.callback?.(providerId, event),
       onSetHooksEnabled: options?.onSetHooksEnabled,
       onReloadAssets: options?.onReloadAssets,

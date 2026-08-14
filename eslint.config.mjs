@@ -38,7 +38,8 @@ export default [
     },
   },
   {
-    files: ['adapters/vscode/constants.ts'],
+    // Color-data / self-contained HTML: not app UI bound by the token system.
+    files: ['adapters/vscode/constants.ts', 'server/src/auth.ts'],
     rules: {
       'pixel-agents/no-inline-colors': 'off',
     },

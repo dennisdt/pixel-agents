@@ -4,6 +4,8 @@ import type { HookProvider } from '../../core/src/provider.js';
 import type { AgentStateStore } from './agentStateStore.js';
 import { TEXT_IDLE_DELAY_MS, TOOL_DONE_DELAY_MS } from './constants.js';
 import { updateContextUsage } from './contextUsage.js';
+import { creditDirectoryTokens, getDirectoryExp } from './directoryStats.js';
+import { folderNameFromCwd } from './jsonl.js';
 import { hasInlineTeammates, hasPromotedBackgroundAgent } from './teamUtils.js';
 import {
   cancelPermissionTimer,
@@ -104,6 +106,20 @@ export function processTranscriptLine(
   try {
     const record = JSON.parse(line);
 
+    // -- Directory-scoped EXP: resolve cwd from the record (Claude records carry it).
+    // Historical tokens are credited once at creation (AgentRuntime); this is the
+    // fallback for agents whose cwd wasn't resolvable at creation (e.g. empty file).
+    if (!agent.cwd && typeof record.cwd === 'string' && record.cwd) {
+      const cwd: string = record.cwd;
+      agent.cwd = cwd;
+      // The display name may still be the lossy project-dir-hash fallback (the
+      // transcript was empty at adoption) — upgrade it now that the real cwd is
+      // known, so refreshes and restarts show the true folder name.
+      agent.folderName = folderNameFromCwd(cwd, agent.folderName);
+      agents.broadcast({ type: 'agentCwd', id: agentId, cwd });
+      agents.broadcast({ type: 'directoryExp', directory: cwd, totalExp: getDirectoryExp(cwd) });
+    }
+
     // -- Agent Teams: extract team metadata via the active provider --
     // The provider reads its CLI's own field names (Claude: record.teamName + record.agentName).
     // Other CLIs would implement this differently or not at all.
@@ -134,6 +150,30 @@ export function processTranscriptLine(
 
     // -- Context window usage (drives every agent's context gauge) --
     updateContextUsage(agentId, agent, agents, record, hookProvider);
+
+    // -- Token usage extraction from assistant records --
+    const usage = record.message?.usage as
+      { input_tokens?: number; output_tokens?: number } | undefined;
+    if (usage) {
+      if (typeof usage.input_tokens === 'number') {
+        agent.inputTokens += usage.input_tokens;
+      }
+      if (typeof usage.output_tokens === 'number') {
+        agent.outputTokens += usage.output_tokens;
+        // Directory-scoped EXP: credit this turn's output tokens to the cwd total.
+        // Live deltas only (historical was credited once at creation), so no double-count.
+        if (agent.cwd && usage.output_tokens > 0) {
+          const totalExp = creditDirectoryTokens(agent.cwd, usage.output_tokens);
+          agents.broadcast({ type: 'directoryExp', directory: agent.cwd, totalExp });
+        }
+      }
+      agents.broadcast({
+        type: 'agentTokenUsage',
+        id: agentId,
+        inputTokens: agent.inputTokens,
+        outputTokens: agent.outputTokens,
+      });
+    }
 
     // Resilient content extraction: support both record.message.content and record.content
     // Claude Code may change the JSONL structure across versions

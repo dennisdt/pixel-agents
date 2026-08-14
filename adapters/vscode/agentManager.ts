@@ -117,6 +117,8 @@ export async function launchNewTerminal(
     seenUnknownRecordTypes: new Set(),
     folderName,
     hookDelivered: false,
+    inputTokens: 0,
+    outputTokens: 0,
     contextTokens: 0,
     maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
   };
@@ -382,6 +384,8 @@ export function restoreAgents(
       seenUnknownRecordTypes: new Set(),
       folderName: p.folderName,
       hookDelivered: false,
+      inputTokens: 0,
+      outputTokens: 0,
       contextTokens: 0,
       maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
       teamName: p.teamName,

@@ -12,6 +12,7 @@ import { setCarpetSprites } from '../office/sprites/carpetTiles.js';
 import { setPetTemplates } from '../office/sprites/petSpriteData.js';
 import { setCharacterTemplates } from '../office/sprites/spriteData.js';
 import {
+  calculateLevel,
   extractToolName,
   isSubagentToolName,
   setProviderCapabilities,
@@ -98,6 +99,16 @@ interface ExtensionMessageState {
   setShowAreas: (v: boolean) => void;
 }
 
+/** Tauri-fork: set a character's level + stored exp from cumulative directory EXP. */
+function syncCharacterLevel(os: OfficeState, agentId: number, exp: number): void {
+  if (exp <= 0) return;
+  const ch = os.characters.get(agentId);
+  if (ch && !ch.isSubagent) {
+    ch.level = calculateLevel(exp).level;
+    ch.directoryExp = exp;
+  }
+}
+
 function saveAgentSeats(os: OfficeState): void {
   const seats: Record<number, { palette: number; hueShift: number; seatId: string | null }> = {};
   for (const ch of os.characters.values()) {
@@ -146,6 +157,12 @@ export function useExtensionMessages(
     setRendererGhostHeadlessAgents(enabled);
   }, []);
 
+  // Tauri-fork: directory-scoped EXP (cumulative output tokens per project dir)
+  // drives character leveling & aura effects. agentCwdsRef maps agent id -> cwd
+  // so directoryExp updates can resolve to active characters.
+  const directoryExpRef = useRef<Record<string, number>>({});
+  const agentCwdsRef = useRef<Record<number, string>>({});
+
   // Track whether initial layout has been loaded (ref to avoid re-render)
   const layoutReadyRef = useRef(false);
 
@@ -191,6 +208,25 @@ export function useExtensionMessages(
         });
       }
 
+      // Add a restored/existing agent's office character + apply its level.
+      // Used by the layoutLoaded flush and by existingAgents when the layout has
+      // already loaded — the standalone server sends layoutLoaded *before*
+      // existingAgents, so buffering-only would strand restored agents: they'd
+      // never reach OfficeState and the office would render no characters.
+      const addExistingAgent = (p: {
+        id: number;
+        palette?: number;
+        hueShift?: number;
+        seatId?: string;
+        folderName?: string;
+        isHeadless?: boolean;
+      }) => {
+        os.addAgent(p.id, p.palette, p.hueShift, p.seatId, true, p.folderName);
+        if (p.isHeadless) os.setHeadless(p.id, true);
+        const cwd = agentCwdsRef.current[p.id];
+        if (cwd) syncCharacterLevel(os, p.id, directoryExpRef.current[cwd] ?? 0);
+      };
+
       if (msg.type === 'providerCapabilities') {
         setProviderCapabilities({
           readingTools: msg.readingTools,
@@ -216,8 +252,7 @@ export function useExtensionMessages(
         }
         // Add buffered agents now that layout (and seats) are correct
         for (const p of pendingAgents) {
-          os.addAgent(p.id, p.palette, p.hueShift, p.seatId, true, p.folderName);
-          if (p.isHeadless) os.setHeadless(p.id, true);
+          addExistingAgent(p);
         }
         pendingAgents = [];
         layoutReadyRef.current = true;
@@ -231,6 +266,7 @@ export function useExtensionMessages(
       } else if (msg.type === 'agentCreated') {
         const id = msg.id as number;
         const folderName = msg.folderName as string | undefined;
+        const cwd = msg.cwd as string | undefined;
         const isTeammate = msg.isTeammate as boolean | undefined;
         const teammateName = msg.teammateName as string | undefined;
         const teammateParentId = msg.parentAgentId as number | undefined;
@@ -273,9 +309,14 @@ export function useExtensionMessages(
             os.setHeadless(id, true);
           }
         }
+        if (cwd) {
+          agentCwdsRef.current[id] = cwd;
+          syncCharacterLevel(os, id, directoryExpRef.current[cwd] ?? 0);
+        }
         saveAgentSeats(os);
       } else if (msg.type === 'agentClosed') {
         const id = msg.id as number;
+        delete agentCwdsRef.current[id];
         setAgents((prev) => prev.filter((a) => a !== id));
         setSelectedAgent((prev) => (prev === id ? null : prev));
         setAgentTools((prev) => {
@@ -305,6 +346,11 @@ export function useExtensionMessages(
         const incoming = msg.agents as number[];
         const meta = (msg.agentMeta || {}) as Record<number, ExistingAgentMeta>;
         const folderNames = (msg.folderNames || {}) as Record<number, string>;
+        // Per-agent cwd for directory-scoped leveling (resolved server-side).
+        const cwds = (msg.cwds || {}) as Record<number, string>;
+        for (const [idStr, cwd] of Object.entries(cwds)) {
+          if (cwd) agentCwdsRef.current[Number(idStr)] = cwd;
+        }
         const externalAgents = (msg.externalAgents || {}) as Record<number, boolean>;
         const headlessAgents: Record<number, boolean> = {};
         for (const id of incoming) {
@@ -326,6 +372,10 @@ export function useExtensionMessages(
             headlessAgents,
           )
         ) {
+          for (const id of incoming) {
+            const cwd = agentCwdsRef.current[id];
+            if (cwd) syncCharacterLevel(os, id, directoryExpRef.current[cwd] ?? 0);
+          }
           saveAgentSeats(os);
         }
         setAgents((prev) => {
@@ -384,7 +434,17 @@ export function useExtensionMessages(
           !isTeammateSpawn &&
           (!runInBackground || !parentHasTeam)
         ) {
-          const label = status.startsWith('Subtask:') ? status.slice('Subtask:'.length).trim() : '';
+          // Strip the "Subtask:" / "Agent:" verb prefix for display; fall back
+          // to the full status so labels are never empty (an Agent tool or a
+          // description-less Task would otherwise produce a blank tooltip).
+          let label = status.trim();
+          for (const prefix of ['Subtask:', 'Agent:']) {
+            if (label.startsWith(prefix)) {
+              label = label.slice(prefix.length).trim();
+              break;
+            }
+          }
+          if (!label) label = toolName === 'Agent' ? 'agent' : 'subtask';
           const subId = os.addSubagent(id, toolId);
           setSubagentCharacters((prev) => {
             if (prev.some((s) => s.id === subId)) return prev;
@@ -468,6 +528,36 @@ export function useExtensionMessages(
           return { ...prev, [id]: status };
         });
         os.setAgentActive(id, status === 'active');
+        // Belt-and-suspenders: when the agent reports non-active, force all
+        // in-flight tool entries to done. Otherwise a missed agentToolDone
+        // (truncated JSONL, dropped hook event, tool_id mismatch) leaves
+        // a !done entry that getActivityText still treats as "active" and
+        // displays its stale status indefinitely until the next TurnEnd.
+        if (status !== 'active') {
+          setAgentTools((prev) => {
+            const list = prev[id];
+            if (!list || !list.some((t) => !t.done)) return prev;
+            return {
+              ...prev,
+              [id]: list.map((t) => (t.done ? t : { ...t, done: true })),
+            };
+          });
+          setSubagentTools((prev) => {
+            const agentSubs = prev[id];
+            if (!agentSubs) return prev;
+            let changed = false;
+            const nextSubs: typeof agentSubs = {};
+            for (const [parent, list] of Object.entries(agentSubs)) {
+              if (list.some((t) => !t.done)) {
+                changed = true;
+                nextSubs[parent] = list.map((t) => (t.done ? t : { ...t, done: true }));
+              } else {
+                nextSubs[parent] = list;
+              }
+            }
+            return changed ? { ...prev, [id]: nextSubs } : prev;
+          });
+        }
         if (status === 'waiting') {
           os.showWaitingBubble(id, msg.awaitingInput === true);
           playDoneSound();
@@ -661,6 +751,29 @@ export function useExtensionMessages(
       } else if (msg.type === 'externalAssetDirectoriesUpdated') {
         if (Array.isArray(msg.dirs)) {
           setExternalAssetDirectories(msg.dirs as string[]);
+        }
+      } else if (msg.type === 'directoryExpAll') {
+        const stats = (msg.stats as Record<string, number>) ?? {};
+        directoryExpRef.current = { ...stats };
+        for (const [idStr, cwd] of Object.entries(agentCwdsRef.current)) {
+          syncCharacterLevel(os, Number(idStr), stats[cwd] ?? 0);
+        }
+      } else if (msg.type === 'directoryExp') {
+        const dir = msg.directory as string;
+        const totalExp = msg.totalExp as number;
+        directoryExpRef.current[dir] = totalExp;
+        for (const [idStr, cwd] of Object.entries(agentCwdsRef.current)) {
+          if (cwd === dir) {
+            syncCharacterLevel(os, Number(idStr), totalExp);
+          }
+        }
+      } else if (msg.type === 'agentCwd') {
+        // Server resolved an agent's working directory (drives directory-scoped leveling).
+        const id = msg.id as number;
+        const cwd = msg.cwd as string | undefined;
+        if (cwd) {
+          agentCwdsRef.current[id] = cwd;
+          syncCharacterLevel(os, id, directoryExpRef.current[cwd] ?? 0);
         }
       } else if (msg.type === 'furnitureAssetsLoaded') {
         try {

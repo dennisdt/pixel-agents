@@ -100,6 +100,11 @@ components:
         - $ref: '#/components/schemas/AgentTeamInfo'
         # Context window
         - $ref: '#/components/schemas/AgentContextUsage'
+        - $ref: '#/components/schemas/AgentTokenUsage'
+        # Leveling (directory-scoped EXP)
+        - $ref: '#/components/schemas/AgentCwd'
+        - $ref: '#/components/schemas/DirectoryExp'
+        - $ref: '#/components/schemas/DirectoryExpAll'
         # Layout
         - $ref: '#/components/schemas/LayoutLoaded'
         # Assets
@@ -116,6 +121,8 @@ components:
         - $ref: '#/components/schemas/WorkspaceFolders'
         # Diagnostics
         - $ref: '#/components/schemas/AgentDiagnostics'
+        # Launch-from-web
+        - $ref: '#/components/schemas/RecentProjects'
       discriminator: type
 
     ClientMessage:
@@ -141,6 +148,7 @@ components:
         - $ref: '#/components/schemas/SaveAreaMappings'
         - $ref: '#/components/schemas/SetShowAreas'
         - $ref: '#/components/schemas/RequestDiagnostics'
+        - $ref: '#/components/schemas/RequestRecentProjects'
       discriminator: type
 
     # ── Server message variants ────────────────────────────────────
@@ -187,6 +195,9 @@ components:
         hueShift:
           type: integer
           description: Server-assigned hue shift in degrees (0-360).
+        cwd:
+          type: string
+          description: Working directory of the session (keys directory-scoped EXP/leveling).
 
     AgentClosed:
       description: An agent has been removed from the office.
@@ -220,6 +231,11 @@ components:
       properties:
         type:
           const: existingAgents
+        cwds:
+          type: object
+          description: Map of agent ID (string) to working directory (for directory-scoped leveling).
+          additionalProperties:
+            type: string
         agents:
           type: array
           items:
@@ -417,6 +433,21 @@ components:
         teamUsesTmux:
           type: boolean
 
+    AgentTokenUsage:
+      description: Cumulative token usage for the agent's session.
+      type: object
+      additionalProperties: false
+      required: [type, id, inputTokens, outputTokens]
+      properties:
+        type:
+          const: agentTokenUsage
+        id:
+          type: integer
+        inputTokens:
+          type: integer
+        outputTokens:
+          type: integer
+
     AgentContextUsage:
       description: |
         How much of the agent's context window is in use, as of its most recent
@@ -438,6 +469,65 @@ components:
           type: integer
         maxContextTokens:
           type: integer
+
+    AgentCwd:
+      description: |
+        The server resolved an agent's working directory (from JSONL `cwd`).
+        Drives directory-scoped leveling: the client maps the agent to this cwd.
+      type: object
+      additionalProperties: false
+      required: [type, id, cwd]
+      properties:
+        type:
+          const: agentCwd
+        id:
+          type: integer
+        cwd:
+          type: string
+
+    DirectoryExp:
+      description: |
+        Updated cumulative EXP (output tokens) for a working directory. The client
+        re-levels any character whose resolved cwd matches `directory`.
+      type: object
+      additionalProperties: false
+      required: [type, directory, totalExp]
+      properties:
+        type:
+          const: directoryExp
+        directory:
+          type: string
+        totalExp:
+          type: integer
+
+    DirectoryExpAll:
+      description: |
+        Snapshot of all directory→EXP totals. Sent on connect so a (re)connecting
+        client can compute levels for already-present agents.
+      type: object
+      additionalProperties: false
+      required: [type, stats]
+      properties:
+        type:
+          const: directoryExpAll
+        stats:
+          type: object
+          description: Map of working directory to cumulative EXP (output tokens).
+          additionalProperties:
+            type: integer
+
+    RecentProjects:
+      description: Recent projects from ~/.claude/projects, for the web launch picker.
+      type: object
+      additionalProperties: false
+      required: [type, projects]
+      properties:
+        type:
+          const: recentProjects
+        projects:
+          type: array
+          items:
+            $ref: '#/components/schemas/RecentProject'
 
     LayoutLoaded:
       description: |
@@ -957,7 +1047,30 @@ components:
         type:
           const: requestDiagnostics
 
+    RequestRecentProjects:
+      description: Request the recent-projects list (server responds with recentProjects).
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        type:
+          const: requestRecentProjects
+
     # ── Supporting schemas ─────────────────────────────────────────
+
+    RecentProject:
+      type: object
+      additionalProperties: false
+      required: [hash, displayName, lastUsed]
+      properties:
+        hash:
+          type: string
+        displayName:
+          type: string
+        fullPath:
+          type: [string, 'null']
+        lastUsed:
+          type: integer
 
     AgentSeatMeta:
       description: |

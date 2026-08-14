@@ -8,6 +8,8 @@ export interface AgentState {
   /** Whether this agent was detected from an external source (VS Code extension panel, etc.) */
   isExternal: boolean;
   projectDir: string;
+  /** Real working directory of the session (from JSONL record.cwd). Keys directory-scoped EXP. */
+  cwd?: string;
   jsonlFile: string;
   fileOffset: number;
   lineBuffer: string;
@@ -46,6 +48,12 @@ export interface AgentState {
    *  routing in SubagentStart. Set in PreToolUse, NOT cleared in PostToolUse (survives
    *  the PostToolUse-before-SubagentStart race); overwritten on the next PreToolUse. */
   currentHookIsTeammateSpawn?: boolean;
+
+  // -- Cumulative token usage (drives directory-scoped EXP/leveling) --
+  /** Cumulative input tokens across the session. */
+  inputTokens: number;
+  /** Cumulative output tokens across the session; the EXP currency. */
+  outputTokens: number;
 
   // -- Context window usage (server/src/contextUsage.ts) --
   /** Tokens in the agent's context as of its newest turn; 0 until one is seen.

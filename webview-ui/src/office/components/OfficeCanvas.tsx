@@ -99,6 +99,18 @@ export function OfficeCanvas({
     [officeState, zoom],
   );
 
+  // Live mirrors of props/state the once-registered native touch listener reads,
+  // so it never has to re-register. didPanRef swallows the click after a drag.
+  const didPanRef = useRef(false);
+  const zoomRef = useRef(zoom);
+  zoomRef.current = zoom;
+  const isEditModeRef = useRef(isEditMode);
+  isEditModeRef.current = isEditMode;
+  const onZoomChangeRef = useRef(onZoomChange);
+  onZoomChangeRef.current = onZoomChange;
+  const clampPanRef = useRef(clampPan);
+  clampPanRef.current = clampPan;
+
   // Resize canvas backing store to device pixels (no DPR transform on ctx)
   const resizeCanvas = useCallback(() => {
     const canvas = canvasRef.current;
@@ -713,6 +725,12 @@ export function OfficeCanvas({
 
   const handleClick = useCallback(
     (e: React.MouseEvent) => {
+      if (didPanRef.current) {
+        // A touch drag just panned — swallow the trailing click so it doesn't
+        // also select/deselect an agent.
+        didPanRef.current = false;
+        return;
+      }
       if (isEditMode) return; // handled by mouseDown/mouseUp
       const pos = screenToWorld(e.clientX, e.clientY);
       if (!pos) return;
@@ -870,6 +888,91 @@ export function OfficeCanvas({
     return () => canvas.removeEventListener('wheel', handleWheel);
   }, [handleWheel]);
 
+  // Touch pan / pinch-zoom (mouse + pen keep their existing handlers). One
+  // finger pans in view mode (edit mode lets the synthesized click paint/place);
+  // two fingers pinch to step the zoom. Registered once; reads live refs.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const pts = new Map<number, { x: number; y: number }>();
+    let panStart: { px: number; py: number; x: number; y: number } | null = null;
+    let pinchDist = 0;
+
+    const onDown = (e: PointerEvent) => {
+      // Any new press starts a fresh interaction. Reset BEFORE the touch filter:
+      // after a touch pan the browser never synthesizes the click that would
+      // consume the flag, so a mouse/pen press must clear it or its next click
+      // is silently swallowed (hybrid touch+mouse devices).
+      didPanRef.current = false;
+      if (e.pointerType !== 'touch') return;
+      unlockAudio();
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pts.size === 1) {
+        panStart = { px: panRef.current.x, py: panRef.current.y, x: e.clientX, y: e.clientY };
+      } else if (pts.size === 2) {
+        panStart = null;
+        const [a, b] = [...pts.values()];
+        pinchDist = Math.hypot(a.x - b.x, a.y - b.y);
+      }
+    };
+
+    const onMove = (e: PointerEvent) => {
+      if (e.pointerType !== 'touch' || !pts.has(e.pointerId)) return;
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+      if (pts.size >= 2) {
+        e.preventDefault();
+        didPanRef.current = true;
+        const [a, b] = [...pts.values()];
+        const dist = Math.hypot(a.x - b.x, a.y - b.y);
+        if (pinchDist > 0) {
+          const ratio = dist / pinchDist;
+          if (ratio > 1.25 || ratio < 0.8) {
+            const nz = Math.max(
+              ZOOM_MIN,
+              Math.min(ZOOM_MAX, zoomRef.current + (ratio > 1 ? 1 : -1)),
+            );
+            if (nz !== zoomRef.current) {
+              officeState.cameraFollowId = null;
+              onZoomChangeRef.current(nz);
+            }
+            pinchDist = dist;
+          }
+        }
+        return;
+      }
+
+      // Single finger: pan in view mode only (edit mode → synthesized mouse paints).
+      if (isEditModeRef.current || !panStart) return;
+      const dpr = window.devicePixelRatio || 1;
+      const dx = (e.clientX - panStart.x) * dpr;
+      const dy = (e.clientY - panStart.y) * dpr;
+      if (Math.abs(dx) + Math.abs(dy) > 4) {
+        didPanRef.current = true;
+        officeState.cameraFollowId = null;
+      }
+      panRef.current = clampPanRef.current(panStart.px + dx, panStart.py + dy);
+    };
+
+    const onUp = (e: PointerEvent) => {
+      if (e.pointerType !== 'touch') return;
+      pts.delete(e.pointerId);
+      if (pts.size < 2) pinchDist = 0;
+      if (pts.size === 0) panStart = null;
+    };
+
+    canvas.addEventListener('pointerdown', onDown);
+    canvas.addEventListener('pointermove', onMove, { passive: false });
+    canvas.addEventListener('pointerup', onUp);
+    canvas.addEventListener('pointercancel', onUp);
+    return () => {
+      canvas.removeEventListener('pointerdown', onDown);
+      canvas.removeEventListener('pointermove', onMove);
+      canvas.removeEventListener('pointerup', onUp);
+      canvas.removeEventListener('pointercancel', onUp);
+    };
+  }, [officeState, panRef]);
+
   // Prevent default middle-click browser behavior (auto-scroll)
   const handleAuxClick = useCallback((e: React.MouseEvent) => {
     if (e.button === 1) e.preventDefault();
@@ -886,7 +989,7 @@ export function OfficeCanvas({
         onAuxClick={handleAuxClick}
         onMouseLeave={handleMouseLeave}
         onContextMenu={handleContextMenu}
-        className="block"
+        className="block game-canvas"
       />
     </div>
   );

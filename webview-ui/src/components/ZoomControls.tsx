@@ -69,7 +69,10 @@ export function ZoomControls({ zoom, onZoomChange }: ZoomControlsProps) {
       )}
 
       {/* Vertically stacked round buttons — top-left */}
-      <div className="absolute top-8 left-8 z-10 flex flex-col gap-4">
+      <div
+        className="absolute top-8 left-8 z-10 flex flex-col gap-4"
+        style={{ marginTop: 'env(safe-area-inset-top)', marginLeft: 'env(safe-area-inset-left)' }}
+      >
         <Button
           size="icon_lg"
           onClick={() => onZoomChange(zoom + 1)}

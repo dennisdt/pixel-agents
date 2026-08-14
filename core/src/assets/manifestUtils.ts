@@ -46,6 +46,9 @@ export interface FurnitureManifest {
   height?: number;
   footprintW?: number;
   footprintH?: number;
+  // A single asset may still be oriented/stateful (e.g. a side-facing chair).
+  orientation?: string;
+  state?: string;
   // If type is 'group':
   groupType?: string;
   rotationScheme?: string;

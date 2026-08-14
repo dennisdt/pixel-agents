@@ -17,6 +17,10 @@ export const WANDER_MOVES_BEFORE_REST_MIN = 3;
 export const WANDER_MOVES_BEFORE_REST_MAX = 6;
 export const SEAT_REST_MIN_SEC = 120.0;
 export const SEAT_REST_MAX_SEC = 240.0;
+/** How long a newly spawned character waits at its seat before wandering.
+ *  Must exceed the backend scan interval (2 s) so an active agent gets its
+ *  first agentStatus event before it ever leaves its seat. */
+export const SPAWN_SEAT_DELAY_SEC = 5.0;
 
 // ── Matrix Effect ────────────────────────────────────────────
 export const MATRIX_EFFECT_DURATION_SEC = 0.3;
@@ -192,6 +196,76 @@ export const FURNITURE_ANIM_INTERVAL_SEC = 0.2;
 export const WHATS_NEW_AUTO_CLOSE_MS = 20000;
 export const WHATS_NEW_FADE_MS = 1000;
 
+// ── Leveling / EXP ──────────────────────────────────────────
+export const EXP_BASE_COST = 5000;
+export const EXP_TIERS = [
+  { maxLevel: 5, growth: 1.5 },
+  { maxLevel: 10, growth: 1.35 },
+  { maxLevel: 20, growth: 1.18 },
+  { maxLevel: 35, growth: 1.08 },
+  { maxLevel: 50, growth: 1.04 },
+  { maxLevel: 100, growth: 1.01 }, // endgame: long, steady climb to 100
+] as const;
+export const EXP_BAR_WIDTH_PX = 80;
+export const EXP_BAR_HEIGHT_PX = 8;
+export const EXP_BAR_BG_COLOR = 'rgba(0, 0, 0, 0.75)';
+export const EXP_BAR_FILL_COLOR = '#5ac88c';
+export const EXP_BAR_BORDER_COLOR = 'rgba(255, 255, 255, 0.7)';
+
+// ── Leveling Rewards ────────────────────────────────────────
+export const LEVEL_TITLES = [
+  { level: 1, title: 'Intern', color: '#888888' },
+  { level: 5, title: 'Junior', color: '#cccccc' },
+  { level: 8, title: 'Developer', color: '#5ac88c' },
+  { level: 12, title: 'Senior', color: '#5a9ec8' },
+  { level: 16, title: 'Staff', color: '#8a5ac8' },
+  { level: 20, title: 'Principal', color: '#c8a85a' },
+  { level: 25, title: 'Architect', color: '#ff7b5a' },
+  { level: 30, title: 'Fellow', color: '#ff5a8a' },
+  { level: 35, title: 'Legend', color: '#ffd700' },
+  { level: 40, title: 'Mythic', color: '#ff4500' },
+  { level: 50, title: 'Transcendent', color: '#00ffcc' },
+  { level: 60, title: 'Ascendant', color: '#66e0ff' },
+  { level: 70, title: 'Immortal', color: '#ff9d45' },
+  { level: 80, title: 'Celestial', color: '#b48aff' },
+  { level: 90, title: 'Divine', color: '#ffee77' },
+  { level: 100, title: 'Singularity', color: '#ff5ad0' },
+] as const;
+
+export const LEVEL_AURAS = [
+  { level: 12, id: 'sparkle' },
+  { level: 15, id: 'halo' },
+  { level: 25, id: 'ember' },
+  { level: 35, id: 'prism' },
+  { level: 40, id: 'static' },
+  { level: 50, id: 'galaxy' },
+  { level: 65, id: 'storm' },
+  { level: 80, id: 'phoenix' },
+  { level: 100, id: 'ascendant' },
+] as const;
+
+// Aura animation constants (per-effect counts/alphas are lerped by intensity in auraEffect.ts)
+export const AURA_SPARKLE_CYCLE_SEC = 2.0;
+export const AURA_HALO_BOB_SEC = 2.4;
+export const AURA_HALO_GLINT_SEC = 3.0;
+export const AURA_EMBER_RISE_SEC = 2.2;
+export const AURA_PRISM_HUE_DRIFT_SEC = 6.0;
+export const AURA_STATIC_BURST_SLOW_SEC = 1.1;
+export const AURA_STATIC_BURST_FAST_SEC = 0.55;
+export const AURA_STATIC_FLASH_SEC = 0.12;
+export const AURA_GALAXY_ROTATE_SEC = 8.0;
+export const AURA_GALAXY_COMET_SEC = 5.0;
+export const AURA_STORM_RING_ROTATE_SEC = 6.0;
+export const AURA_STORM_ARC_SLOW_SEC = 0.7;
+export const AURA_STORM_ARC_FAST_SEC = 0.4;
+export const AURA_STORM_ARC_FLASH_SEC = 0.14;
+export const AURA_PHOENIX_FLICKER_HZ = 1; // true Hz (sin gets the 2π factor)
+export const AURA_PHOENIX_EMBER_RISE_SEC = 1.4;
+export const AURA_PHOENIX_WING_SEC = 2.2;
+export const AURA_ASCENDANT_SIGIL_ROTATE_SEC = 7.0;
+export const AURA_ASCENDANT_RAY_ROTATE_SEC = 11.0;
+export const AURA_ASCENDANT_PULSE_SEC = 3.0;
+
 // ── Game Logic ───────────────────────────────────────────────
 export const MAX_DELTA_TIME_SEC = 0.1;
 export const WAITING_BUBBLE_DURATION_SEC = 2.0;
@@ -205,6 +279,7 @@ export const AUTO_ON_SIDE_DEPTH = 2;
 export const CHARACTER_HIT_HALF_WIDTH = 8;
 export const CHARACTER_HIT_HEIGHT = 24;
 export const TOOL_OVERLAY_VERTICAL_OFFSET = 32;
+export const PULSE_ANIMATION_DURATION_SEC = 1.5;
 
 // ── Context Fuel Gauge ──────────────────────────────────────
 /** Window assumed before the runtime reports one (it always does for agents

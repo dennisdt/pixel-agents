@@ -92,6 +92,8 @@ export class SubagentWatch {
       lastDataAt: Date.now(),
       linesProcessed: 0,
       seenUnknownRecordTypes: new Set(),
+      inputTokens: 0,
+      outputTokens: 0,
       contextTokens: 0,
       maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
       leadAgentId: leadId,

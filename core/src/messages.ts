@@ -25,6 +25,10 @@ export type ServerMessage =
   | SubagentToolPermission
   | AgentTeamInfo
   | AgentContextUsage
+  | AgentTokenUsage
+  | AgentCwd
+  | DirectoryExp
+  | DirectoryExpAll
   | LayoutLoaded
   | FurnitureAssetsLoaded
   | CharacterSpritesLoaded
@@ -36,7 +40,8 @@ export type ServerMessage =
   | ExternalAssetDirectoriesUpdated
   | AreaMappingsLoaded
   | WorkspaceFolders
-  | AgentDiagnostics;
+  | AgentDiagnostics
+  | RecentProjects;
 
 export type ClientMessage =
   | WebviewReady
@@ -59,7 +64,8 @@ export type ClientMessage =
   | RemoveExternalAssetDirectory
   | SaveAreaMappings
   | SetShowAreas
-  | RequestDiagnostics;
+  | RequestDiagnostics
+  | RequestRecentProjects;
 
 export interface ProviderCapabilities {
   type: 'providerCapabilities';
@@ -74,6 +80,7 @@ export interface AgentCreated {
   isExternal?: boolean;
   palette?: number;
   hueShift?: number;
+  cwd?: string;
 }
 
 export interface AgentClosed {
@@ -88,6 +95,7 @@ export interface AgentSelected {
 
 export interface ExistingAgents {
   type: 'existingAgents';
+  cwds?: Record<string, string>;
   agents: number[];
   agentMeta: Record<string, AgentSeatMeta>;
   folderNames: Record<string, string>;
@@ -183,6 +191,30 @@ export interface AgentContextUsage {
   id: number;
   contextTokens: number;
   maxContextTokens: number;
+}
+
+export interface AgentTokenUsage {
+  type: 'agentTokenUsage';
+  id: number;
+  inputTokens: number;
+  outputTokens: number;
+}
+
+export interface AgentCwd {
+  type: 'agentCwd';
+  id: number;
+  cwd: string;
+}
+
+export interface DirectoryExp {
+  type: 'directoryExp';
+  directory: string;
+  totalExp: number;
+}
+
+export interface DirectoryExpAll {
+  type: 'directoryExpAll';
+  stats: Record<string, number>;
 }
 
 export interface LayoutLoaded {
@@ -299,6 +331,18 @@ export interface AgentDiagnostics {
   agents: Record<string, any>[];
 }
 
+export interface RecentProjects {
+  type: 'recentProjects';
+  projects: RecentProject[];
+}
+
+export interface RecentProject {
+  hash: string;
+  displayName: string;
+  fullPath?: string | null;
+  lastUsed: number;
+}
+
 export interface WebviewReady {
   type: 'webviewReady';
 }
@@ -403,4 +447,8 @@ export interface SetShowAreas {
 
 export interface RequestDiagnostics {
   type: 'requestDiagnostics';
+}
+
+export interface RequestRecentProjects {
+  type: 'requestRecentProjects';
 }
